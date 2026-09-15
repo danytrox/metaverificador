@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+build/
+dist/
+.idea/
+.vscode/
+*.spec.bak
+# exiftool descargado (binario, no versionar)
+resources/exiftool/exiftool*
+!resources/exiftool/README.txt

@@ -1,0 +1,2 @@
+# Solo para empaquetar el ejecutable
+pyinstaller>=6.6
