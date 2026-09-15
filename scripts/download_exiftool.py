@@ -1,116 +1,94 @@
-"""Descarga el binario oficial de ExifTool para Windows y lo deja como
-resources/exiftool/exiftool.exe (para empaquetarlo dentro del .exe).
+"""Descarga el paquete Windows de ExifTool y lo deja en resources/exiftool/
+para empaquetarlo dentro del .exe.
 
-- Solo usa la biblioteca estándar (sin dependencias).
-- Descarga directa desde exiftool.org / SourceForge (canales oficiales).
-- El archivo del zip se llama "exiftool(-k).exe"; se renombra a exiftool.exe
-  para uso en línea de comandos (tal como indica la documentación oficial).
+Fuente primaria: mirror de Oliver Betz (https://oliverbetz.de), el mismo
+sistema de launcher + Perl portátil que exiftool.org usa para su paquete
+oficial de Windows desde mediados de 2024. Es un enlace directo (sin el
+challenge de Cloudflare que bloquea a SourceForge para descargas automáticas).
+
+Estructura resultante en resources/exiftool/:
+  exiftool.exe       (launcher, renombrado desde ExifTool.exe)
+  exiftool_files/    (Perl portátil + biblioteca ExifTool)
+
+Solo usa la biblioteca estándar; sin dependencias.
 """
 from __future__ import annotations
 
 import io
 import os
 import re
-import shutil
 import sys
 import urllib.error
 import urllib.request
 import zipfile
 
-VERSION = "13.59"  # versión conocida; si da 404, se busca la última automáticamente
+VERSION = "13.59"
+OB_BASE = "https://oliverbetz.de/cms/files/Artikel/ExifTool-for-Windows"
 DEST = os.path.normpath(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "resources", "exiftool")
 )
 
-_DOWNLOAD_URLS = [
-    "https://downloads.sourceforge.net/project/exiftool/exiftool-{ver}_64.zip",
-    "https://sourceforge.net/projects/exiftool/files/exiftool-{ver}_64.zip/download",
-]
-_HOMEPAGE = "https://exiftool.org/"
+_LAUNCHER_NAMES = ("ExifTool.exe", "exiftool(-k).exe", "exiftool.exe")
 
 
 def _fetch(url: str) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
+    with urllib.request.urlopen(req, timeout=180) as resp:
         return resp.read()
 
 
 def _latest_version() -> str:
-    """Descubre la última versión de Windows desde la portada de exiftool.org."""
-    html = _fetch(_HOMEPAGE).decode("utf-8", errors="replace")
-    versions = re.findall(r"exiftool-(\d+\.\d+)_64\.zip", html)
-    if not versions:
-        return VERSION
-    return max(versions, key=lambda v: [int(x) for x in v.split(".")])
+    try:
+        txt = _fetch(f"{OB_BASE}/exiftool_latest_version.txt").decode("utf-8", errors="replace")
+        v = txt.strip().splitlines()[0].strip()
+        if re.fullmatch(r"\d+\.\d+", v):
+            return v
+    except OSError:
+        pass
+    return VERSION
 
 
-def _download(version: str) -> bytes:
-    last_err: Exception | None = None
-    for tmpl in _DOWNLOAD_URLS:
-        url = tmpl.format(ver=version)
-        try:
-            print(f"Descargando {url}")
-            return _fetch(url)
-        except urllib.error.HTTPError as exc:
-            last_err = exc
-            print(f"  HTTP {exc.code} en {url}")
-        except OSError as exc:
-            last_err = exc
-            print(f"  Error de red en {url}: {exc}")
-    raise last_err or RuntimeError("descarga fallida")
-
-
-def _extract_exe(data: bytes) -> str:
+def _extract(data: bytes) -> None:
     z = zipfile.ZipFile(io.BytesIO(data))
-    candidates = [
-        n for n in z.namelist()
-        if n.lower().endswith(".exe") and "exiftool" in os.path.basename(n).lower()
-    ]
-    if not candidates:
-        print("ERROR: no se encontró ningún exiftool*.exe dentro del zip.", file=sys.stderr)
-        print("Contenido del zip:", file=sys.stderr)
-        for n in z.namelist():
-            print(f"  {n}", file=sys.stderr)
+    z.extractall(DEST)
+    # Normalizar el launcher a "exiftool.exe"
+    for name in _LAUNCHER_NAMES:
+        p = os.path.join(DEST, name)
+        if os.path.isfile(p):
+            target = os.path.join(DEST, "exiftool.exe")
+            if os.path.normcase(name) != os.path.normcase("exiftool.exe"):
+                if os.path.exists(target):
+                    os.remove(target)
+                os.rename(p, target)
+            print(f"Launcher: {name!r} -> exiftool.exe")
+            break
+    else:
+        print("ERROR: no se encontró el launcher de exiftool en el zip.", file=sys.stderr)
         sys.exit(1)
-    src = candidates[0]
-    target = os.path.join(DEST, "exiftool.exe")
-    with z.open(src) as fsrc, open(target, "wb") as fdst:
-        shutil.copyfileobj(fsrc, fdst)
-    print(f"Extraído {src!r} -> {target}")
-    return target
-
-
-def _print_manual_help() -> None:
-    print(
-        "\nNo se pudo descargar ExifTool automáticamente (bloqueo de red, proxy o IP restringida).\n"
-        "Descárgalo manualmente desde https://exiftool.org (sección 'Windows Executable'),\n"
-        "descomprime el zip y coloca el ejecutable renombrado como:\n"
-        f"  {os.path.join(DEST, 'exiftool.exe')}\n",
-        file=sys.stderr,
-    )
+    if not os.path.isdir(os.path.join(DEST, "exiftool_files")):
+        print("AVISO: el zip no trae exiftool_files/ (puede ser un exe PAR autónomo).")
+    print(f"OK -> {os.path.join(DEST, 'exiftool.exe')}")
 
 
 def main() -> int:
     os.makedirs(DEST, exist_ok=True)
-    version = VERSION
+    version = _latest_version()
+    url = f"{OB_BASE}/exiftool-{version}_64.zip"
     try:
-        data = _download(version)
-    except urllib.error.HTTPError as exc:
-        if exc.code != 404:
-            _print_manual_help()
-            return 1
-        version = _latest_version()
-        print(f"Versión {VERSION} no disponible; usando la última: {version}")
-        try:
-            data = _download(version)
-        except OSError:
-            _print_manual_help()
-            return 1
-    except OSError:
-        _print_manual_help()
+        print(f"Descargando {url}")
+        data = _fetch(url)
+    except OSError as exc:
+        print(
+            f"\nNo se pudo descargar ExifTool automáticamente ({exc}).\n"
+            "Descárgalo manualmente desde https://exiftool.org (Windows Executable)\n"
+            "o desde https://oliverbetz.de/pages/Artikel/ExifTool-for-Windows,\n"
+            "descomprime el zip y deja su contenido en:\n"
+            f"  {DEST}\n",
+            file=sys.stderr,
+        )
         return 1
-    print(f"Descargado {len(data)} bytes.")
-    _extract_exe(data)
+    print(f"Descargado {len(data)} bytes (versión {version}).")
+    _extract(data)
     return 0
 
 

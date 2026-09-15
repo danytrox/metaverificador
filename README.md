@@ -78,9 +78,12 @@ El `.exe` se compila **en Windows** (PyInstaller no compila en cruzado). Dos ví
 2. **Automático por GitHub Actions**: cada `push` a este repo compila el `.exe`
    y lo deja como artefacto descargable (pestaña *Actions*).
 
-El build descarga el binario oficial de ExifTool desde exiftool.org y lo
-empaqueta dentro del ejecutable. El resultado es un único `.exe` portátil que
-no requiere instalación.
+El build descarga el paquete Windows de ExifTool (launcher + Perl portátil)
+desde el mirror de Oliver Betz —el mismo sistema que exiftool.org usa para su
+paquete oficial de Windows— y lo empaqueta dentro del ejecutable. Se usa ese
+mirror porque el enlace directo de SourceForge está detrás de un challenge de
+Cloudflare que bloquea las descargas automáticas. El resultado es un único
+`.exe` portátil que no requiere instalación.
 
 ## Uso
 

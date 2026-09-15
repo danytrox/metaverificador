@@ -34,22 +34,23 @@ class FileResult:
 
 def find_exiftool() -> Optional[str]:
     """Localiza el ejecutable de exiftool (empaquetado o del sistema)."""
+    names = ("exiftool.exe", "ExifTool.exe", "exiftool")
     # 1) Empaquetado con PyInstaller (onefile extrae a sys._MEIPASS)
     base = getattr(sys, "_MEIPASS", None)
     if base:
-        for name in ("exiftool.exe", "exiftool"):
+        for name in names:
             p = os.path.join(base, "exiftool", name)
             if os.path.isfile(p):
                 return p
     # 2) Junto al ejecutable (distribución onedir)
     exe_dir = os.path.dirname(sys.executable)
-    for name in ("exiftool.exe", "exiftool"):
+    for name in names:
         p = os.path.join(exe_dir, "exiftool", name)
         if os.path.isfile(p):
             return p
     # 3) En el árbol de fuentes (desarrollo)
     src = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "resources", "exiftool")
-    for name in ("exiftool.exe", "exiftool"):
+    for name in names:
         p = os.path.normpath(os.path.join(src, name))
         if os.path.isfile(p):
             return p
