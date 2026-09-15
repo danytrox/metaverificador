@@ -38,7 +38,7 @@ metaverificador/
 ├── app/
 │   ├── extractor.py        # Motor ExifTool + respaldo pypdf/Pillow
 │   ├── analyzer.py         # Localiza autor/título/fecha/software
-│   ├── report.py           # Exportación CSV/JSON/HTML
+│   ├── report.py           # Exportación CSV/JSON/HTML/Excel
 │   ├── cli.py              # Modo terminal
 │   └── ui.py               # Interfaz gráfica (PySide6)
 ├── resources/exiftool/     # Binario de exiftool (empaquetado en el .exe)
@@ -95,8 +95,14 @@ campos. Exporta con los botones CSV / JSON / HTML / XLSX.
 **CLI:**
 
 ```bash
-python main.py --cli archivo1.pdf archivo2.docx --csv reporte.csv --html reporte.html
+python main.py --cli archivo1.pdf archivo2.docx --csv reporte.csv --xlsx reporte.xlsx
 ```
+
+Flags de exportación: `--csv`, `--json`, `--html` y `--xlsx` (se pueden combinar).
+
+El Excel se genera con dos hojas: **Resumen** (una fila por archivo, con el
+autor marcado SÍ/NO, filas rojas para los sin autor, autofiltro y encabezados
+congelados) y **Metadatos** (volcado completo campo por campo).
 
 Ejemplo de salida:
 
