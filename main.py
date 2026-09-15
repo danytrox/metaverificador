@@ -19,12 +19,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--csv", metavar="ARCHIVO.csv", help="Exportar resultados a CSV.")
     p.add_argument("--json", metavar="ARCHIVO.json", help="Exportar resultados a JSON.")
     p.add_argument("--html", metavar="ARCHIVO.html", help="Exportar resultados a HTML.")
+    p.add_argument("--xlsx", metavar="ARCHIVO.xlsx", help="Exportar resultados a Excel (.xlsx).")
     return p
 
 
 def main() -> int:
     args = build_parser().parse_args()
-    if args.cli or (args.paths and (args.csv or args.json or args.html or not sys.stdout.isatty())):
+    if args.cli or (args.paths and (args.csv or args.json or args.html or args.xlsx or not sys.stdout.isatty())):
         from app.cli import run_cli
 
         return run_cli(args)

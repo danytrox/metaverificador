@@ -30,7 +30,7 @@ from PySide6.QtWidgets import (
 
 from .analyzer import summarize
 from .extractor import ExifToolBackend, get_backend
-from .report import export_csv, export_html, export_json
+from .report import export_csv, export_html, export_json, export_xlsx
 
 _COLUMNS = ["Archivo", "Tipo", "Autor", "Autor (valores)", "Título", "Fecha", "Software"]
 
@@ -94,6 +94,7 @@ class MainWindow(QMainWindow):
         self.btn_export_csv = QPushButton("CSV")
         self.btn_export_json = QPushButton("JSON")
         self.btn_export_html = QPushButton("HTML")
+        self.btn_export_xlsx = QPushButton("XLSX")
         self.btn_add_files.clicked.connect(self._add_files)
         self.btn_add_folder.clicked.connect(self._add_folder)
         self.btn_remove.clicked.connect(self._remove_selected)
@@ -101,11 +102,12 @@ class MainWindow(QMainWindow):
         self.btn_export_csv.clicked.connect(lambda: self._export("csv"))
         self.btn_export_json.clicked.connect(lambda: self._export("json"))
         self.btn_export_html.clicked.connect(lambda: self._export("html"))
+        self.btn_export_xlsx.clicked.connect(lambda: self._export("xlsx"))
         for b in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear):
             bar.addWidget(b)
         bar.addSpacing(20)
         bar.addWidget(QLabel("Exportar:"))
-        for b in (self.btn_export_csv, self.btn_export_json, self.btn_export_html):
+        for b in (self.btn_export_csv, self.btn_export_json, self.btn_export_html, self.btn_export_xlsx):
             bar.addWidget(b)
         bar.addStretch(1)
         self.engine_label = QLabel("")
@@ -331,7 +333,7 @@ class MainWindow(QMainWindow):
         if not done:
             QMessageBox.information(self, "MetaVerificador", "No hay resultados que exportar.")
             return
-        filters = {"csv": "CSV (*.csv)", "json": "JSON (*.json)", "html": "HTML (*.html)"}
+        filters = {"csv": "CSV (*.csv)", "json": "JSON (*.json)", "html": "HTML (*.html)", "xlsx": "Excel (*.xlsx)"}
         path, _ = QFileDialog.getSaveFileName(self, "Guardar reporte", f"reporte.{fmt}", filters[fmt])
         if not path:
             return
@@ -340,6 +342,8 @@ class MainWindow(QMainWindow):
                 export_csv(done, path)
             elif fmt == "json":
                 export_json(done, path)
+            elif fmt == "xlsx":
+                export_xlsx(done, path)
             else:
                 export_html(done, path)
         except Exception as exc:  # noqa: BLE001

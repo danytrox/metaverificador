@@ -17,7 +17,7 @@ herramienta lo detecta y te lo explica, sin exponer tus archivos.
   claramente cuando un archivo **no tiene autor**.
 - Muestra título, fecha de creación y software de origen.
 - Procesa **carpetas enteras** (recursivo) y admite **arrastrar y soltar**.
-- Exporta informes a **CSV**, **JSON** y **HTML** (autocontenido, sin CDN).
+- Exporta informes a **CSV**, **JSON**, **HTML** y **Excel (.xlsx)** (autocontenido, sin CDN).
 - Resalta en rojo los archivos sin autor.
 - Doble motor: ExifTool (completo) y respaldo en Python puro (pypdf/Pillow).
 
@@ -90,7 +90,7 @@ Cloudflare que bloquea las descargas automáticas. El resultado es un único
 **GUI:** arrastra archivos o carpetas a la ventana, o usa "Agregar
 archivos/carpeta". La tabla muestra por archivo si tiene autor, los valores
 encontrados, título, fecha y software. El panel inferior muestra todos los
-campos. Exporta con los botones CSV / JSON / HTML.
+campos. Exporta con los botones CSV / JSON / HTML / XLSX.
 
 **CLI:**
 

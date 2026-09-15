@@ -5,7 +5,7 @@ import argparse
 
 from .analyzer import summarize
 from .extractor import get_backend
-from .report import export_csv, export_html, export_json
+from .report import export_csv, export_html, export_json, export_xlsx
 
 
 def run_cli(args: argparse.Namespace) -> int:
@@ -33,4 +33,7 @@ def run_cli(args: argparse.Namespace) -> int:
     if args.html:
         export_html(summaries, args.html)
         print(f"HTML -> {args.html}")
+    if args.xlsx:
+        export_xlsx(summaries, args.xlsx)
+        print(f"XLSX -> {args.xlsx}")
     return 0
