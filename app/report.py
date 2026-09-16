@@ -37,11 +37,11 @@ def export_csv(summaries: Iterable[Summary], path: str) -> None:
                 s.path,
                 s.filetype,
                 "SI" if s.author_found else "NO",
-                "; ".join(s.author_values),
+                " | ".join(s.author_values),
                 s.title,
                 s.creation_date,
-                "; ".join(s.software),
-                "; ".join(s.warnings),
+                " | ".join(s.software),
+                " | ".join(s.warnings),
             ])
 
 

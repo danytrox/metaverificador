@@ -1,12 +1,16 @@
 """Interfaz gráfica (PySide6). Arrastrar y soltar, tabla de resultados,
-detalle de metadatos y exportación CSV/JSON/HTML. Todo local."""
+detalle de metadatos y exportación CSV/JSON/HTML/Excel. Todo local.
+
+Los colores de resaltado se adaptan al tema (claro/oscuro) del sistema para
+que el texto siempre sea legible.
+"""
 from __future__ import annotations
 
 import os
 import sys
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont
+from PySide6.QtGui import QColor, QFont, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -17,6 +21,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -24,6 +29,7 @@ from PySide6.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -79,6 +85,26 @@ class MainWindow(QMainWindow):
         self._build_ui()
         self._refresh_engine_label()
 
+    # ---------- Tema ----------
+    def _is_dark(self) -> bool:
+        return self.palette().color(QPalette.Window).lightness() < 128
+
+    def _row_colors(self) -> dict:
+        """Colores de resaltado según el tema (claro u oscuro)."""
+        if self._is_dark():
+            return {
+                "no_bg": "#4a2530",   # rojo oscuro (fondo fila sin autor)
+                "no_fg": "#f5c6cb",   # rosa claro (texto legible sobre el fondo)
+                "yes": "#7ee2a8",     # verde claro
+                "no": "#ff8a8a",      # rojo claro
+            }
+        return {
+            "no_bg": "#fdecea",       # rosa claro (fondo fila sin autor)
+            "no_fg": None,            # texto por defecto (oscuro) es legible
+            "yes": "#1e7b34",         # verde oscuro
+            "no": "#c00000",          # rojo oscuro
+        }
+
     # ---------- UI ----------
     def _build_ui(self):
         central = QWidget()
@@ -91,27 +117,40 @@ class MainWindow(QMainWindow):
         self.btn_add_folder = QPushButton("Agregar carpeta")
         self.btn_remove = QPushButton("Quitar seleccionados")
         self.btn_clear = QPushButton("Limpiar")
-        self.btn_export_csv = QPushButton("CSV")
-        self.btn_export_json = QPushButton("JSON")
-        self.btn_export_html = QPushButton("HTML")
-        self.btn_export_xlsx = QPushButton("XLSX")
+        self.btn_add_files.setToolTip("Selecciona uno o más archivos para analizar")
+        self.btn_add_folder.setToolTip("Analiza todos los archivos de una carpeta (recursivo)")
+        self.btn_remove.setToolTip("Quita de la lista los archivos seleccionados")
+        self.btn_clear.setToolTip("Vacía la lista y los resultados")
+
+        # Botón único de exportación con menú desplegable
+        self.btn_export = QToolButton()
+        self.btn_export.setText("Exportar")
+        self.btn_export.setToolTip("Guarda los resultados en el formato que elijas")
+        self.btn_export.setPopupMode(QToolButton.InstantPopup)
+        self.btn_export.setEnabled(False)
+        export_menu = QMenu(self.btn_export)
+        a = export_menu.addAction("Excel (.xlsx) — resumen + todos los metadatos")
+        a.triggered.connect(lambda: self._export("xlsx"))
+        a = export_menu.addAction("CSV (.csv) — tabla simple")
+        a.triggered.connect(lambda: self._export("csv"))
+        a = export_menu.addAction("JSON (.json) — datos completos")
+        a.triggered.connect(lambda: self._export("json"))
+        a = export_menu.addAction("HTML (.html) — informe para navegador")
+        a.triggered.connect(lambda: self._export("html"))
+        self.btn_export.setMenu(export_menu)
+
         self.btn_add_files.clicked.connect(self._add_files)
         self.btn_add_folder.clicked.connect(self._add_folder)
         self.btn_remove.clicked.connect(self._remove_selected)
         self.btn_clear.clicked.connect(self._clear)
-        self.btn_export_csv.clicked.connect(lambda: self._export("csv"))
-        self.btn_export_json.clicked.connect(lambda: self._export("json"))
-        self.btn_export_html.clicked.connect(lambda: self._export("html"))
-        self.btn_export_xlsx.clicked.connect(lambda: self._export("xlsx"))
+
         for b in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear):
-            bar.addWidget(b)
-        bar.addSpacing(20)
-        bar.addWidget(QLabel("Exportar:"))
-        for b in (self.btn_export_csv, self.btn_export_json, self.btn_export_html, self.btn_export_xlsx):
             bar.addWidget(b)
         bar.addStretch(1)
         self.engine_label = QLabel("")
         bar.addWidget(self.engine_label)
+        bar.addSpacing(16)
+        bar.addWidget(self.btn_export)
         root.addLayout(bar)
 
         splitter = QSplitter(Qt.Horizontal)
@@ -156,15 +195,17 @@ class MainWindow(QMainWindow):
         root.addLayout(bottom)
 
     def _refresh_engine_label(self):
+        dark = self._is_dark()
         if isinstance(self.backend, ExifToolBackend) and self.backend.available:
             self.engine_label.setText("Motor: ExifTool (local)")
-            self.engine_label.setStyleSheet("color:#155724;font-weight:bold;")
+            color = "#7ee2a8" if dark else "#155724"
         else:
             self.engine_label.setText("Motor: Python (respaldo)")
-            self.engine_label.setStyleSheet("color:#856404;font-weight:bold;")
+            color = "#f0c674" if dark else "#856404"
             self.status.setText(
                 "ExifTool no encontrado; usando backend de respaldo (menos completo)."
             )
+        self.engine_label.setStyleSheet(f"color:{color};font-weight:bold;")
 
     # ---------- Archivos ----------
     def _add_files(self):
@@ -242,11 +283,13 @@ class MainWindow(QMainWindow):
 
     def _update_status(self):
         total = len(self._summaries)
+        done = sum(1 for s in self._summaries.values() if s is not None)
         if not total:
             self.status.setText("Arrastra archivos o carpetas aquí, o usa los botones.")
+            self.btn_export.setEnabled(False)
             return
         missing = sum(1 for s in self._summaries.values() if s is not None and not s.author_found)
-        done = sum(1 for s in self._summaries.values() if s is not None)
+        self.btn_export.setEnabled(done > 0)
         self.status.setText(
             f"{done}/{total} analizados · {missing} sin autor · "
             "los archivos nunca salen de este equipo"
@@ -263,20 +306,29 @@ class MainWindow(QMainWindow):
         if row == -1:
             row = self.table.rowCount()
             self.table.insertRow(row)
+        colors = self._row_colors()
         values = [
             summary.filename,
             summary.filetype,
             "SI" if summary.author_found else "NO",
-            "; ".join(summary.author_values),
+            " | ".join(summary.author_values),
             summary.title,
             summary.creation_date,
-            "; ".join(summary.software),
+            " | ".join(summary.software),
         ]
         for col, text in enumerate(values):
             item = QTableWidgetItem(text)
             item.setData(Qt.UserRole, summary.path)
             if not summary.author_found:
-                item.setBackground(QColor("#fdecea"))
+                item.setBackground(QColor(colors["no_bg"]))
+                if colors["no_fg"]:
+                    item.setForeground(QColor(colors["no_fg"]))
+            if col == 2:  # columna "Autor"
+                f = QFont()
+                f.setBold(True)
+                item.setFont(f)
+                item.setForeground(QColor(colors["yes"] if summary.author_found else colors["no"]))
+                item.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, col, item)
 
     def _rebuild_table(self):
@@ -315,7 +367,7 @@ class MainWindow(QMainWindow):
         if summary.creation_date:
             lines.append(f"Fecha   : {summary.creation_date}")
         if summary.software:
-            lines.append(f"Software: {'; '.join(summary.software)}")
+            lines.append(f"Software: {' | '.join(summary.software)}")
         if summary.warnings:
             lines.append("")
             lines.append("Advertencias:")
