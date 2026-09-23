@@ -8,41 +8,38 @@ from datetime import datetime
 from typing import Iterable
 
 from .analyzer import Summary
+from .template import TemplateSpec, _as_text, is_author_column, resolve_cell
 
 
 def _summaries_to_list(items: Iterable[Summary]) -> list[Summary]:
     return list(items)
 
 
-def _as_text(v) -> str:
-    """Convierte cualquier valor de metadato a texto legible."""
-    if v is None:
-        return ""
-    if isinstance(v, (list, tuple, set)):
-        return " | ".join(_as_text(x) for x in v)
-    return str(v)
-
-
-def export_csv(summaries: Iterable[Summary], path: str) -> None:
+def export_csv(summaries: Iterable[Summary], path: str, template: TemplateSpec | None = None) -> None:
     summaries = _summaries_to_list(summaries)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
-        w.writerow([
-            "Archivo", "Ruta", "Tipo", "Autor", "Autor_valores", "Titulo",
-            "Fecha_creacion", "Software", "Advertencias",
-        ])
-        for s in summaries:
+        if template is None:
             w.writerow([
-                s.filename,
-                s.path,
-                s.filetype,
-                "SI" if s.author_found else "NO",
-                " | ".join(s.author_values),
-                s.title,
-                s.creation_date,
-                " | ".join(s.software),
-                " | ".join(s.warnings),
+                "Archivo", "Ruta", "Tipo", "Autor", "Autor_valores", "Titulo",
+                "Fecha_creacion", "Software", "Advertencias",
             ])
+            for s in summaries:
+                w.writerow([
+                    s.filename,
+                    s.path,
+                    s.filetype,
+                    "SÍ" if s.author_found else "NO",
+                    " | ".join(s.author_values),
+                    s.title,
+                    s.creation_date,
+                    " | ".join(s.software),
+                    " | ".join(s.warnings),
+                ])
+        else:
+            w.writerow([c.header for c in template.columns])
+            for s in summaries:
+                w.writerow([resolve_cell(c, s) for c in template.columns])
 
 
 def export_json(summaries: Iterable[Summary], path: str) -> None:
@@ -60,6 +57,8 @@ def export_json(summaries: Iterable[Summary], path: str) -> None:
             f, ensure_ascii=False, indent=2,
         )
 
+
+_DEFAULT_HTML_COLUMNS = ["Archivo", "Tipo", "Autor", "Autor (valores)", "Título", "Fecha", "Software", "Advertencias", "Detalle"]
 
 _HTML_TEMPLATE = """<!doctype html>
 <html lang="es">
@@ -86,7 +85,7 @@ _HTML_TEMPLATE = """<!doctype html>
 <h1>MetaVerificador - Reporte de metadatos</h1>
 <div class="meta">Generado {generated} · {n} archivo(s) · análisis 100% local</div>
 <table>
-<thead><tr><th>Archivo</th><th>Tipo</th><th>Autor</th><th>Autor (valores)</th><th>Título</th><th>Fecha</th><th>Software</th><th>Advertencias</th><th>Detalle</th></tr></thead>
+<thead><tr>{headers}</tr></thead>
 <tbody>
 {rows}
 </tbody>
@@ -96,79 +95,128 @@ _HTML_TEMPLATE = """<!doctype html>
 """
 
 
-def export_html(summaries: Iterable[Summary], path: str) -> None:
+def export_html(summaries: Iterable[Summary], path: str, template: TemplateSpec | None = None) -> None:
     summaries = _summaries_to_list(summaries)
     rows = []
-    for s in summaries:
-        cls = "" if s.author_found else "sin-autor"
-        pill = '<span class="pill si">SI</span>' if s.author_found else '<span class="pill no">NO</span>'
-        tags_html = "<pre>" + html.escape(
-            "\n".join(f"{k}: {v}" for k, v in sorted(s.tags.items()))
-        ) + "</pre>"
-        rows.append(
-            f'<tr class="{cls}">'
-            f'<td>{html.escape(s.filename)}</td>'
-            f'<td>{html.escape(s.filetype)}</td>'
-            f'<td>{pill}</td>'
-            f'<td>{html.escape("; ".join(s.author_values))}</td>'
-            f'<td>{html.escape(s.title)}</td>'
-            f'<td>{html.escape(s.creation_date)}</td>'
-            f'<td>{html.escape("; ".join(s.software))}</td>'
-            f'<td>{html.escape("; ".join(s.warnings))}</td>'
-            f'<td><details><summary>ver</summary>{tags_html}</details></td>'
-            f'</tr>'
-        )
+    if template is None:
+        header_cells = "".join(f"<th>{html.escape(c)}</th>" for c in _DEFAULT_HTML_COLUMNS)
+        for s in summaries:
+            cls = "" if s.author_found else "sin-autor"
+            pill = '<span class="pill si">SÍ</span>' if s.author_found else '<span class="pill no">NO</span>'
+            tags_html = "<pre>" + html.escape(
+                "\n".join(f"{k}: {v}" for k, v in sorted(s.tags.items()))
+            ) + "</pre>"
+            rows.append(
+                f'<tr class="{cls}">'
+                f'<td>{html.escape(s.filename)}</td>'
+                f'<td>{html.escape(s.filetype)}</td>'
+                f'<td>{pill}</td>'
+                f'<td>{html.escape("; ".join(s.author_values))}</td>'
+                f'<td>{html.escape(s.title)}</td>'
+                f'<td>{html.escape(s.creation_date)}</td>'
+                f'<td>{html.escape("; ".join(s.software))}</td>'
+                f'<td>{html.escape("; ".join(s.warnings))}</td>'
+                f'<td><details><summary>ver</summary>{tags_html}</details></td>'
+                f'</tr>'
+            )
+    else:
+        columns = template.columns
+        header_cells = "".join(f"<th>{html.escape(c.header)}</th>" for c in columns)
+        for s in summaries:
+            cls = "" if s.author_found else "sin-autor"
+            cells = []
+            for c in columns:
+                val = resolve_cell(c, s)
+                if c.kind == "author_bool":
+                    cells.append(
+                        f'<td><span class="pill si">SÍ</span></td>'
+                        if s.author_found else
+                        f'<td><span class="pill no">NO</span></td>'
+                    )
+                elif c.kind == "tags":
+                    cells.append(f'<td><details><summary>ver</summary><pre>{html.escape(val)}</pre></details></td>')
+                else:
+                    cells.append(f"<td>{html.escape(val)}</td>")
+            rows.append(f'<tr class="{cls}">' + "".join(cells) + "</tr>")
     doc = _HTML_TEMPLATE.format(
         generated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         n=len(summaries),
+        headers=header_cells,
         rows="\n".join(rows),
     )
     with open(path, "w", encoding="utf-8") as f:
         f.write(doc)
 
 
-def export_xlsx(summaries: Iterable[Summary], path: str) -> None:
-    """Exporta a Excel (.xlsx) con dos hojas: Resumen y Metadatos completos.
-
-    Hoja "Resumen": una fila por archivo con título, encabezado, autofiltro y
-    filas congeladas. El autor se marca SÍ (verde) / NO (rojo) y las filas sin
-    autor van sombreadas en rojo.
-    Hoja "Metadatos": volcado completo campo por campo (Archivo, Grupo, Campo,
-    Valor) para inspeccionar todos los metadatos extraídos.
-    """
-    from openpyxl import Workbook
+def _xlsx_styles():
     from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    return {
+        "header_fill": PatternFill("solid", fgColor="1F4E79"),
+        "header_font": Font(bold=True, color="FFFFFF", size=11),
+        "title_font": Font(bold=True, color="FFFFFF", size=14),
+        "sub_font": Font(italic=True, color="595959", size=10),
+        "legend_font": Font(italic=True, color="595959", size=9),
+        "no_fill": PatternFill("solid", fgColor="FDE7E9"),
+        "yes_font": Font(bold=True, color="1E7B34"),
+        "no_font": Font(bold=True, color="C00000"),
+        "border": Border(
+            left=Side(style="thin", color="BFBFBF"),
+            right=Side(style="thin", color="BFBFBF"),
+            top=Side(style="thin", color="BFBFBF"),
+            bottom=Side(style="thin", color="BFBFBF"),
+        ),
+        "center": Alignment(horizontal="center", vertical="center"),
+        "top_wrap": Alignment(vertical="top", wrap_text=True),
+    }
+
+
+def _add_metadata_sheet(wb, summaries: list[Summary]) -> None:
+    """Hoja 'Metadatos': volcado completo campo por campo."""
     from openpyxl.utils import get_column_letter
 
-    summaries = _summaries_to_list(summaries)
+    st = _xlsx_styles()
+    ws = wb.create_sheet("Metadatos")
+    cols = ["Archivo", "Grupo", "Campo", "Valor"]
+    for i, name in enumerate(cols, start=1):
+        cell = ws.cell(row=1, column=i, value=name)
+        cell.font = st["header_font"]
+        cell.fill = st["header_fill"]
+        cell.alignment = st["center"]
+        cell.border = st["border"]
 
-    header_fill = PatternFill("solid", fgColor="1F4E79")
-    header_font = Font(bold=True, color="FFFFFF", size=11)
-    title_font = Font(bold=True, color="FFFFFF", size=14)
-    sub_font = Font(italic=True, color="595959", size=10)
-    legend_font = Font(italic=True, color="595959", size=9)
-    no_fill = PatternFill("solid", fgColor="FDE7E9")
-    yes_font = Font(bold=True, color="1E7B34")
-    no_font = Font(bold=True, color="C00000")
-    thin = Side(style="thin", color="BFBFBF")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    center = Alignment(horizontal="center", vertical="center")
-    top_wrap = Alignment(vertical="top", wrap_text=True)
+    r = 2
+    for s in summaries:
+        for k in sorted(s.tags):
+            grupo, _, campo = k.partition(":")
+            vals = [s.filename, grupo, campo, _as_text(s.tags[k])]
+            for i, val in enumerate(vals, start=1):
+                cell = ws.cell(row=r, column=i, value=val)
+                cell.border = st["border"]
+                cell.alignment = st["top_wrap"]
+            r += 1
 
-    wb = Workbook()
+    for i, w in enumerate([38, 16, 30, 70], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "B2"
+    if r > 2:
+        ws.auto_filter.ref = f"A1:D{r - 1}"
 
-    # ---------- Hoja 1: Resumen ----------
-    ws = wb.active
-    ws.title = "Resumen"
-    cols = ["Archivo", "Ruta", "Tipo", "Autor", "Autor (detalle)",
-            "Título", "Fecha de creación", "Software", "Advertencias"]
-    last_col = get_column_letter(len(cols))
+
+def _add_template_sheet(ws, summaries: list[Summary], template: TemplateSpec) -> None:
+    """Hoja 'Datos' generada a partir de una plantilla de columnas."""
+    from openpyxl.styles import Alignment
+    from openpyxl.utils import get_column_letter
+
+    st = _xlsx_styles()
+    cols = template.columns
+    last_col = get_column_letter(max(len(cols), 1))
 
     ws.merge_cells(f"A1:{last_col}1")
     c = ws["A1"]
-    c.value = "MetaVerificador — Reporte de metadatos"
-    c.font = title_font
-    c.fill = header_fill
+    c.value = f"MetaVerificador — {template.name}"
+    c.font = st["title_font"]
+    c.fill = st["header_fill"]
     c.alignment = Alignment(horizontal="left", vertical="center")
     ws.row_dimensions[1].height = 26
 
@@ -178,79 +226,130 @@ def export_xlsx(summaries: Iterable[Summary], path: str) -> None:
         f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}   ·   "
         f"{len(summaries)} archivo(s)   ·   análisis 100% local"
     )
-    c.font = sub_font
+    c.font = st["sub_font"]
     ws.row_dimensions[2].height = 16
 
-    ws.merge_cells(f"A3:{last_col}3")
-    c = ws["A3"]
-    c.value = (
-        "Leyenda:  SÍ = registra autor en metadatos  ·  NO = sin autor (fila en rojo)  ·  "
-        "\"Autor (detalle)\" indica el campo exacto y el valor encontrado."
-    )
-    c.font = legend_font
-
-    header_row = 4
-    for i, name in enumerate(cols, start=1):
-        cell = ws.cell(row=header_row, column=i, value=name)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = center
-        cell.border = border
+    header_row = 3
+    for i, col in enumerate(cols, start=1):
+        cell = ws.cell(row=header_row, column=i, value=col.header)
+        cell.font = st["header_font"]
+        cell.fill = st["header_fill"]
+        cell.alignment = st["center"]
+        cell.border = st["border"]
 
     for r, s in enumerate(summaries, start=header_row + 1):
-        vals = [
-            s.filename,
-            s.path,
-            s.filetype,
-            "SÍ" if s.author_found else "NO",
-            "; ".join(s.author_values),
-            s.title,
-            s.creation_date,
-            "; ".join(s.software),
-            "; ".join(s.warnings),
-        ]
-        for i, val in enumerate(vals, start=1):
+        for i, col in enumerate(cols, start=1):
+            val = resolve_cell(col, s)
             cell = ws.cell(row=r, column=i, value=val)
-            cell.border = border
-            cell.alignment = top_wrap
+            cell.border = st["border"]
+            cell.alignment = st["top_wrap"]
             if not s.author_found:
-                cell.fill = no_fill
-        autor_cell = ws.cell(row=r, column=4)
-        autor_cell.font = yes_font if s.author_found else no_font
-        autor_cell.alignment = center
+                cell.fill = st["no_fill"]
+            if is_author_column(col):
+                cell.font = st["yes_font"] if s.author_found else st["no_font"]
+                cell.alignment = st["center"]
 
-    for i, w in enumerate([38, 40, 14, 9, 45, 30, 20, 38, 45], start=1):
-        ws.column_dimensions[get_column_letter(i)].width = w
-    ws.freeze_panes = "B5"
+    for i in range(1, len(cols) + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 30
+    ws.freeze_panes = f"B{header_row + 1}"
     last_row = header_row + len(summaries)
     if summaries:
         ws.auto_filter.ref = f"A{header_row}:{last_col}{last_row}"
 
-    # ---------- Hoja 2: Metadatos completos ----------
-    ws2 = wb.create_sheet("Metadatos")
-    cols2 = ["Archivo", "Grupo", "Campo", "Valor"]
-    for i, name in enumerate(cols2, start=1):
-        cell = ws2.cell(row=1, column=i, value=name)
-        cell.font = header_font
-        cell.fill = header_fill
-        cell.alignment = center
-        cell.border = border
 
-    r = 2
-    for s in summaries:
-        for k in sorted(s.tags):
-            grupo, _, campo = k.partition(":")
-            vals2 = [s.filename, grupo, campo, _as_text(s.tags[k])]
-            for i, val in enumerate(vals2, start=1):
-                cell = ws2.cell(row=r, column=i, value=val)
-                cell.border = border
-                cell.alignment = top_wrap
-            r += 1
+def export_xlsx(summaries: Iterable[Summary], path: str, template: TemplateSpec | None = None) -> None:
+    """Exporta a Excel (.xlsx).
 
-    for i, w in enumerate([38, 16, 30, 70], start=1):
-        ws2.column_dimensions[get_column_letter(i)].width = w
-    ws2.freeze_panes = "B2"
-    if r > 2:
-        ws2.auto_filter.ref = f"A1:D{r - 1}"
+    Sin plantilla: dos hojas — "Resumen" (una fila por archivo con autor SÍ/NO,
+    filas rojas para los sin autor) y "Metadatos" (volcado completo).
+    Con plantilla: hoja "Datos" con las columnas pedidas por la plantilla, más
+    la hoja "Metadatos" con el volcado completo.
+    """
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment
+    from openpyxl.utils import get_column_letter
+
+    summaries = _summaries_to_list(summaries)
+    st = _xlsx_styles()
+
+    wb = Workbook()
+
+    if template is None:
+        # ---------- Hoja 1: Resumen ----------
+        ws = wb.active
+        ws.title = "Resumen"
+        cols = ["Archivo", "Ruta", "Tipo", "Autor", "Autor (detalle)",
+                "Título", "Fecha de creación", "Software", "Advertencias"]
+        last_col = get_column_letter(len(cols))
+
+        ws.merge_cells(f"A1:{last_col}1")
+        c = ws["A1"]
+        c.value = "MetaVerificador — Reporte de metadatos"
+        c.font = st["title_font"]
+        c.fill = st["header_fill"]
+        c.alignment = Alignment(horizontal="left", vertical="center")
+        ws.row_dimensions[1].height = 26
+
+        ws.merge_cells(f"A2:{last_col}2")
+        c = ws["A2"]
+        c.value = (
+            f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}   ·   "
+            f"{len(summaries)} archivo(s)   ·   análisis 100% local"
+        )
+        c.font = st["sub_font"]
+        ws.row_dimensions[2].height = 16
+
+        ws.merge_cells(f"A3:{last_col}3")
+        c = ws["A3"]
+        c.value = (
+            "Leyenda:  SÍ = registra autor en metadatos  ·  NO = sin autor (fila en rojo)  ·  "
+            "\"Autor (detalle)\" indica el campo exacto y el valor encontrado."
+        )
+        c.font = st["legend_font"]
+
+        header_row = 4
+        for i, name in enumerate(cols, start=1):
+            cell = ws.cell(row=header_row, column=i, value=name)
+            cell.font = st["header_font"]
+            cell.fill = st["header_fill"]
+            cell.alignment = st["center"]
+            cell.border = st["border"]
+
+        for r, s in enumerate(summaries, start=header_row + 1):
+            vals = [
+                s.filename,
+                s.path,
+                s.filetype,
+                "SÍ" if s.author_found else "NO",
+                "; ".join(s.author_values),
+                s.title,
+                s.creation_date,
+                "; ".join(s.software),
+                "; ".join(s.warnings),
+            ]
+            for i, val in enumerate(vals, start=1):
+                cell = ws.cell(row=r, column=i, value=val)
+                cell.border = st["border"]
+                cell.alignment = st["top_wrap"]
+                if not s.author_found:
+                    cell.fill = st["no_fill"]
+            autor_cell = ws.cell(row=r, column=4)
+            autor_cell.font = st["yes_font"] if s.author_found else st["no_font"]
+            autor_cell.alignment = st["center"]
+
+        for i, w in enumerate([38, 40, 14, 9, 45, 30, 20, 38, 45], start=1):
+            ws.column_dimensions[get_column_letter(i)].width = w
+        ws.freeze_panes = "B5"
+        last_row = header_row + len(summaries)
+        if summaries:
+            ws.auto_filter.ref = f"A{header_row}:{last_col}{last_row}"
+    else:
+        # ---------- Hoja 1: Datos (según plantilla) ----------
+        ws = wb.active
+        ws.title = "Datos"
+        _add_template_sheet(ws, summaries, template)
+
+    # ---------- Hoja: Metadatos completos ----------
+    _add_metadata_sheet(wb, summaries)
 
     wb.save(path)

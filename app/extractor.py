@@ -72,12 +72,15 @@ class ExifToolBackend:
         self,
         paths: Iterable[str],
         progress_cb: Optional[Callable[[int, int], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> list[FileResult]:
         paths = [os.path.abspath(p) for p in paths]
         results: list[FileResult] = []
         total = len(paths)
         done = 0
         for i in range(0, total, _BATCH_SIZE):
+            if cancel_cb and cancel_cb():
+                break
             chunk = paths[i : i + _BATCH_SIZE]
             cmd = [
                 self.exe, "-json", "-G", "-a", "-s",
@@ -96,10 +99,13 @@ class ExifToolBackend:
                 for item in parsed:
                     src = item.get("SourceFile") or ""
                     tags = {k: v for k, v in item.items() if k != "SourceFile"}
-                    results.append(FileResult(path=src, tags=tags))
+                    err = tags.get("Error") or None
+                    results.append(FileResult(path=src, tags=tags, error=err))
             else:
                 # Reintentar archivo por archivo (algún archivo rompió el lote)
                 for p in chunk:
+                    if cancel_cb and cancel_cb():
+                        break
                     results.append(self._extract_one(p))
             done += len(chunk)
             if progress_cb:
@@ -107,7 +113,7 @@ class ExifToolBackend:
         return results
 
     def _extract_one(self, path: str) -> FileResult:
-        cmd = [self.exe, "-json", "-G", "-a", "-s", path]
+        cmd = [self.exe, "-json", "-G", "-a", "-s", "-charset", "filename=UTF8", path]
         proc = subprocess.run(
             cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
         )
@@ -117,7 +123,8 @@ class ExifToolBackend:
                 if data:
                     item = data[0]
                     tags = {k: v for k, v in item.items() if k != "SourceFile"}
-                    return FileResult(path=os.path.abspath(path), tags=tags)
+                    err = tags.get("Error") or None
+                    return FileResult(path=os.path.abspath(path), tags=tags, error=err)
             except json.JSONDecodeError:
                 pass
         msg = (proc.stderr or "").strip() or "exiftool: error desconocido"
@@ -131,11 +138,14 @@ class PurePythonBackend:
         self,
         paths: Iterable[str],
         progress_cb: Optional[Callable[[int, int], None]] = None,
+        cancel_cb: Optional[Callable[[], bool]] = None,
     ) -> list[FileResult]:
         paths = list(paths)
         results = []
         total = len(paths)
         for i, p in enumerate(paths):
+            if cancel_cb and cancel_cb():
+                break
             results.append(self._extract_one(os.path.abspath(p)))
             if progress_cb:
                 progress_cb(i + 1, total)

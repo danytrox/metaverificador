@@ -100,7 +100,7 @@ def summarize(result) -> Summary:
         s.warnings.append(f"Error: {result.error}")
 
     # Advertencias nativas de exiftool
-    for key in ("Error", "Warning"):
+    for key in ("Warning",):
         if key in tags and tags[key] not in (None, "", " "):
             s.warnings.append(f"{key}: {tags[key]}")
 

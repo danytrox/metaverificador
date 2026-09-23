@@ -34,9 +34,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from .analyzer import summarize
+from .analyzer import Summary, summarize
 from .extractor import ExifToolBackend, get_backend
+from .llm import (
+    enhance_template_columns,
+    is_available as llm_is_available,
+    llama_cpp_installed,
+    ensure_model,
+)
 from .report import export_csv, export_html, export_json, export_xlsx
+from .template import load_template
 
 _COLUMNS = ["Archivo", "Tipo", "Autor", "Autor (valores)", "Título", "Fecha", "Software"]
 
@@ -44,6 +51,7 @@ _COLUMNS = ["Archivo", "Tipo", "Autor", "Autor (valores)", "Título", "Fecha", "
 class Worker(QThread):
     progress = Signal(int, int)
     file_done = Signal(object)
+    failed = Signal(str)
     finished_all = Signal()
 
     def __init__(self, paths, backend):
@@ -62,13 +70,34 @@ class Worker(QThread):
             self.progress.emit(done, total)
 
         try:
-            results = self.backend.extract_many(self.paths, progress_cb=_cb)
+            results = self.backend.extract_many(
+                self.paths, progress_cb=_cb, cancel_cb=lambda: self._cancel
+            )
             for r in results:
                 if self._cancel:
                     break
                 self.file_done.emit(summarize(r))
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
         finally:
             self.finished_all.emit()
+
+
+class ModelDownloadWorker(QThread):
+    """Descarga el modelo de IA local en primer uso, emitiendo progreso."""
+    progress = Signal(int, int)
+    done_ok = Signal(str)
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            path = ensure_model(progress_cb=lambda d, t: self.progress.emit(d, t))
+            if path:
+                self.done_ok.emit(path)
+            else:
+                self.failed.emit("No se pudo obtener el modelo de IA.")
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
 
 
 class MainWindow(QMainWindow):
@@ -80,7 +109,10 @@ class MainWindow(QMainWindow):
 
         self.backend = get_backend()
         self._summaries = {}  # path -> Summary
+        self._row_index = {}  # path -> fila de la tabla (lookup O(1))
         self._worker = None
+        self._dl_worker = None
+        self._template = None
 
         self._build_ui()
         self._refresh_engine_label()
@@ -122,6 +154,15 @@ class MainWindow(QMainWindow):
         self.btn_remove.setToolTip("Quita de la lista los archivos seleccionados")
         self.btn_clear.setToolTip("Vacía la lista y los resultados")
 
+        # Plantilla opcional
+        self.btn_template = QPushButton("Cargar plantilla")
+        self.btn_template.setToolTip("Opcional: un .xlsx o .html cuyos encabezados definen las columnas del informe")
+        self.btn_template_clear = QPushButton("Quitar plantilla")
+        self.btn_template_clear.setToolTip("Vuelve al informe por defecto (sin plantilla)")
+        self.btn_template_clear.setEnabled(False)
+        self.template_label = QLabel("")
+        self.template_label.setStyleSheet("color:#666;font-style:italic;")
+
         # Botón único de exportación con menú desplegable
         self.btn_export = QToolButton()
         self.btn_export.setText("Exportar")
@@ -143,11 +184,16 @@ class MainWindow(QMainWindow):
         self.btn_add_folder.clicked.connect(self._add_folder)
         self.btn_remove.clicked.connect(self._remove_selected)
         self.btn_clear.clicked.connect(self._clear)
+        self.btn_template.clicked.connect(self._load_template)
+        self.btn_template_clear.clicked.connect(self._clear_template)
 
         for b in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear):
             bar.addWidget(b)
+        bar.addWidget(self.btn_template)
+        bar.addWidget(self.btn_template_clear)
         bar.addStretch(1)
         self.engine_label = QLabel("")
+        bar.addWidget(self.template_label)
         bar.addWidget(self.engine_label)
         bar.addSpacing(16)
         bar.addWidget(self.btn_export)
@@ -245,11 +291,83 @@ class MainWindow(QMainWindow):
         self._rebuild_table()
 
     def _clear(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
         self.file_list.clear()
         self._summaries.clear()
+        self._row_index = {}
         self.detail.clear()
         self.table.setRowCount(0)
         self._update_status()
+
+    # ---------- Plantilla opcional ----------
+    def _load_template(self):
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Cargar plantilla", "", "Plantillas (*.xlsx *.html *.htm)"
+        )
+        if not path:
+            return
+        try:
+            spec = load_template(path)
+        except Exception as exc:  # noqa: BLE001
+            QMessageBox.critical(self, "MetaVerificador", f"No se pudo cargar la plantilla:\n{exc}")
+            return
+        if llm_is_available():
+            spec.columns = enhance_template_columns(spec.columns)
+        elif llama_cpp_installed() and any(c.kind == "unknown" for c in spec.columns):
+            self._maybe_download_model(spec)
+        self._template = spec
+        self.btn_template_clear.setEnabled(True)
+        self.template_label.setText(f"Plantilla: {spec.name} ({len(spec.columns)} col.)")
+        self.status.setText(
+            f"Plantilla cargada: {spec.name}. Exporta para aplicarla; sin plantilla se usa el informe por defecto."
+        )
+
+    def _clear_template(self):
+        self._template = None
+        self.btn_template_clear.setEnabled(False)
+        self.template_label.setText("")
+        self._update_status()
+
+    # ---------- Descarga del modelo de IA (primer uso) ----------
+    def _maybe_download_model(self, spec):
+        if self._dl_worker and self._dl_worker.isRunning():
+            return
+        reply = QMessageBox.question(
+            self,
+            "MetaVerificador",
+            "La plantilla tiene columnas que el mapeo determinístico no reconoce.\n"
+            "Puedes descargar el modelo de IA local (~1.1 GB, una sola vez) para "
+            "resolverlas. ¿Descargar ahora?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        self.progress.setVisible(True)
+        self.progress.setRange(0, 0)
+        self.progress.setValue(0)
+        self._dl_worker = ModelDownloadWorker()
+        self._dl_worker.progress.connect(self._on_dl_progress)
+        self._dl_worker.done_ok.connect(lambda _p: self._on_dl_done(spec))
+        self._dl_worker.failed.connect(self._on_dl_failed)
+        self._dl_worker.start()
+
+    def _on_dl_progress(self, done, total):
+        if total:
+            self.progress.setRange(0, total)
+            self.progress.setValue(done)
+
+    def _on_dl_done(self, spec):
+        self.progress.setVisible(False)
+        spec.columns = enhance_template_columns(spec.columns)
+        self.template_label.setText(f"Plantilla: {spec.name} ({len(spec.columns)} col.)")
+        self.status.setText("Modelo de IA listo; plantilla re-mapeada.")
+
+    def _on_dl_failed(self, msg):
+        self.progress.setVisible(False)
+        self.status.setText(
+            f"No se descargó el modelo de IA ({msg}); se usa el mapeo determinístico."
+        )
 
     # ---------- Análisis ----------
     def _start_analysis(self):
@@ -264,6 +382,7 @@ class MainWindow(QMainWindow):
         self._worker = Worker(pending, self.backend)
         self._worker.progress.connect(self._on_progress)
         self._worker.file_done.connect(self._on_file_done)
+        self._worker.failed.connect(self._on_failed)
         self._worker.finished_all.connect(self._on_finished)
         self._worker.start()
 
@@ -273,13 +392,32 @@ class MainWindow(QMainWindow):
 
     @Slot(object)
     def _on_file_done(self, summary):
+        if summary.path not in self._summaries:
+            return  # el archivo se quitó/limpió mientras corría el análisis
         self._summaries[summary.path] = summary
         self._upsert_table_row(summary)
 
+    @Slot(str)
+    def _on_failed(self, msg):
+        for p, s in list(self._summaries.items()):
+            if s is None:
+                summary = Summary(
+                    path=p, filename=os.path.basename(p), tags={},
+                    warnings=[f"Error: {msg}"],
+                )
+                self._summaries[p] = summary
+                self._upsert_table_row(summary)
+        QMessageBox.warning(self, "MetaVerificador", f"Error durante el análisis:\n{msg}")
+
     @Slot()
     def _on_finished(self):
+        self._worker = None
         self.progress.setVisible(False)
-        self._update_status()
+        if any(s is None for s in self._summaries.values()):
+            # Archivos agregados mientras corría el análisis: procesarlos ahora.
+            self._start_analysis()
+        else:
+            self._update_status()
 
     def _update_status(self):
         total = len(self._summaries)
@@ -297,20 +435,17 @@ class MainWindow(QMainWindow):
 
     # ---------- Tabla ----------
     def _upsert_table_row(self, summary):
-        # Reemplazar fila existente o agregar
-        row = -1
-        for i in range(self.table.rowCount()):
-            if self.table.item(i, 0).data(Qt.UserRole) == summary.path:
-                row = i
-                break
+        # Reemplazar fila existente o agregar (lookup O(1) por path)
+        row = self._row_index.get(summary.path, -1)
         if row == -1:
             row = self.table.rowCount()
             self.table.insertRow(row)
+            self._row_index[summary.path] = row
         colors = self._row_colors()
         values = [
             summary.filename,
             summary.filetype,
-            "SI" if summary.author_found else "NO",
+            "SÍ" if summary.author_found else "NO",
             " | ".join(summary.author_values),
             summary.title,
             summary.creation_date,
@@ -333,6 +468,7 @@ class MainWindow(QMainWindow):
 
     def _rebuild_table(self):
         self.table.setRowCount(0)
+        self._row_index = {}
         for summary in self._summaries.values():
             if summary is not None:
                 self._upsert_table_row(summary)
@@ -361,7 +497,7 @@ class MainWindow(QMainWindow):
     @staticmethod
     def _format_detail(summary) -> str:
         lines = [f"Archivo : {summary.filename}", f"Ruta    : {summary.path}",
-                 f"Tipo    : {summary.filetype}", f"Autor   : {'SI' if summary.author_found else 'NO'}"]
+                 f"Tipo    : {summary.filetype}", f"Autor   : {'SÍ' if summary.author_found else 'NO'}"]
         if summary.title:
             lines.append(f"Título  : {summary.title}")
         if summary.creation_date:
@@ -391,13 +527,13 @@ class MainWindow(QMainWindow):
             return
         try:
             if fmt == "csv":
-                export_csv(done, path)
+                export_csv(done, path, template=self._template)
             elif fmt == "json":
                 export_json(done, path)
             elif fmt == "xlsx":
-                export_xlsx(done, path)
+                export_xlsx(done, path, template=self._template)
             else:
-                export_html(done, path)
+                export_html(done, path, template=self._template)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "MetaVerificador", f"Error al exportar: {exc}")
             return

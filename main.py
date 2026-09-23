@@ -20,6 +20,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--json", metavar="ARCHIVO.json", help="Exportar resultados a JSON.")
     p.add_argument("--html", metavar="ARCHIVO.html", help="Exportar resultados a HTML.")
     p.add_argument("--xlsx", metavar="ARCHIVO.xlsx", help="Exportar resultados a Excel (.xlsx).")
+    p.add_argument("--template", metavar="PLANTILLA", help="Plantilla (.xlsx o .html) que define las columnas del informe.")
     return p
 
 

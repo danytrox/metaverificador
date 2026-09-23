@@ -1,0 +1,4 @@
+# Dependencias opcionales para el mapeo de plantillas con IA local.
+# Instalar solo si se desea usar el modelo (además hay que descargar el GGUF
+# con `python scripts/download_model.py`).
+llama-cpp-python>=0.3.0
