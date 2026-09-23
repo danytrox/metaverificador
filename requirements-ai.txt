@@ -1,4 +1,9 @@
 # Dependencias opcionales para el mapeo de plantillas con IA local.
 # Instalar solo si se desea usar el modelo (además hay que descargar el GGUF
 # con `python scripts/download_model.py`).
-llama-cpp-python>=0.3.0
+#
+# El índice extra proporciona wheels precompilados (Windows/Linux/macOS) para
+# no compilar llama.cpp desde fuente, que tarda varios minutos. La versión está
+# fijada para reproducibilidad.
+--extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+llama-cpp-python==0.3.35

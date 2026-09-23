@@ -86,8 +86,11 @@ El `.exe` se compila **en Windows** (PyInstaller no compila en cruzado). Dos ví
 1. **En tu PC con Windows** (requiere Python 3.11/3.12):
    doble clic en `build_windows.bat`. Genera `dist\MetaVerificador.exe`.
 
-2. **Automático por GitHub Actions**: cada `push` a este repo compila el `.exe`
-   y lo deja como artefacto descargable (pestaña *Actions*).
+2. **Automático por GitHub Actions**: cada `push` a `main` compila el `.exe`
+   **sin IA** (rápido) y lo deja como artefacto descargable (pestaña
+   *Actions*). Los tags `v*` (releases) compilan el `.exe` **con IA**, y
+   también se puede forzar con un `workflow_dispatch` manual (opción
+   "Incluir IA local").
 
 El build descarga el paquete Windows de ExifTool (launcher + Perl portátil)
 desde el mirror de Oliver Betz —el mismo sistema que exiftool.org usa para su
@@ -96,13 +99,14 @@ mirror porque el enlace directo de SourceForge está detrás de un challenge de
 Cloudflare que bloquea las descargas automáticas. El resultado es un único
 `.exe` portátil que no requiere instalación.
 
-Si además está instalado `llama-cpp-python` (vía `requirements-ai.txt`), el
-`.exe` incluye la librería de IA local. El modelo GGUF (~1.1 GB) **no** se
-incluye: se descarga en primer uso con `scripts/download_model.py`. En la GUI,
-la primera vez que una plantilla tiene encabezados ambiguos se ofrece descargar
-el modelo (con confirmación); el CLI nunca descarga, solo usa el modelo si ya
-existe. Sin IA, el `.exe` funciona igual con el mapeo determinístico de
-plantillas.
+Cuando se incluye IA, se instala `llama-cpp-python` desde wheels precompilados
+(`requirements-ai.txt` apunta al índice de wheels de abetlen), así que no hay
+que compilar llama.cpp desde fuente. El modelo GGUF (~1.1 GB) **no** se
+incluye en el `.exe`: se descarga en primer uso con
+`scripts/download_model.py`. En la GUI, la primera vez que una plantilla tiene
+encabezados ambiguos se ofrece descargar el modelo (con confirmación); el CLI
+nunca descarga, solo usa el modelo si ya existe. Sin IA, el `.exe` funciona
+igual con el mapeo determinístico de plantillas.
 
 ## Uso
 
@@ -143,6 +147,12 @@ Para activar el mapeo con IA local (opcional):
 pip install -r requirements-ai.txt
 python scripts/download_model.py    # descarga ~1.1 GB una sola vez
 ```
+
+`requirements-ai.txt` instala desde wheels precompilados (sin compilar
+llama.cpp) y fija la versión (`llama-cpp-python==0.3.35`) para un resultado
+reproducible y estable. El modelo usado es **Qwen2.5-1.5B-Instruct**
+(cuantizado q4_k_m, ~1.1 GB): lo bastante pequeño para correr en CPU con
+~1.3 GB de RAM, y fiable generando el JSON de mapeo que esta tarea necesita.
 
 La app detecta el modelo automáticamente (`~/.metaverificador/models` o la
 carpeta `models` junto al ejecutable) y, si no está, sigue funcionando con el
