@@ -93,7 +93,11 @@ class Summary:
 
 def summarize(result) -> Summary:
     tags = result.tags or {}
-    s = Summary(path=result.path, filename=os.path.basename(result.path), tags=dict(tags))
+    s = Summary(
+        path=os.path.abspath(result.path),
+        filename=os.path.basename(result.path),
+        tags=dict(tags),
+    )
 
     s.filetype = tags.get("File:FileType", tags.get("File:MIMEType", ""))
     if result.error:

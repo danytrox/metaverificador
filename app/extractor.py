@@ -20,6 +20,10 @@ from typing import Callable, Iterable, Optional
 # la línea de comandos en Windows).
 _BATCH_SIZE = 200
 
+# En Windows, oculta la ventana de consola que ExifTool abriría al ejecutarse
+# desde la app empaquetada (sin consola propia). En otros SO el valor es 0.
+_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+
 
 @dataclass
 class FileResult:
@@ -87,7 +91,8 @@ class ExifToolBackend:
                 "-charset", "filename=UTF8", *chunk,
             ]
             proc = subprocess.run(
-                cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+                cmd, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", creationflags=_NO_WINDOW,
             )
             parsed = None
             if proc.returncode == 0:
@@ -115,7 +120,8 @@ class ExifToolBackend:
     def _extract_one(self, path: str) -> FileResult:
         cmd = [self.exe, "-json", "-G", "-a", "-s", "-charset", "filename=UTF8", path]
         proc = subprocess.run(
-            cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
+            cmd, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", creationflags=_NO_WINDOW,
         )
         if proc.returncode == 0:
             try:

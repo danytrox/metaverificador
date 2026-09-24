@@ -10,7 +10,7 @@
 
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
-datas = [('resources/exiftool', 'exiftool')]
+datas = [('resources/exiftool', 'exiftool'), ('resources/kofi.png', '.')]
 binaries = []
 hiddenimports = []
 

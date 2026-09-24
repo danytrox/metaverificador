@@ -9,8 +9,8 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QColor, QFont, QPalette
+from PySide6.QtCore import Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -46,6 +46,35 @@ from .report import export_csv, export_html, export_json, export_xlsx
 from .template import load_template
 
 _COLUMNS = ["Archivo", "Tipo", "Autor", "Autor (valores)", "Título", "Fecha", "Software"]
+
+_KOFI_URL = "https://ko-fi.com/F1F41CSLRO"
+
+
+def _resource_path(*parts) -> str:
+    """Ruta a un recurso, tanto en el árbol de fuentes como empaquetado (PyInstaller)."""
+    base = getattr(sys, "_MEIPASS", None)
+    if base:
+        p = os.path.join(base, *parts)
+        if os.path.exists(p):
+            return p
+    return os.path.normpath(
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "resources", *parts)
+    )
+
+
+class ClickableLabel(QLabel):
+    """Etiqueta con imagen que abre una URL al hacer clic."""
+
+    def __init__(self, url: str, parent=None):
+        super().__init__(parent)
+        self._url = url
+        self.setCursor(Qt.PointingHandCursor)
+        self.setToolTip(f"Apoyar el proyecto en Ko-fi\n{url}")
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            QDesktopServices.openUrl(QUrl(self._url))
+        super().mouseReleaseEvent(event)
 
 
 class Worker(QThread):
@@ -113,9 +142,11 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._dl_worker = None
         self._template = None
+        self._pending_tried = set()  # paths ya procesados por el worker actual
 
         self._build_ui()
         self._refresh_engine_label()
+        self._refresh_ai_label()
 
     # ---------- Tema ----------
     def _is_dark(self) -> bool:
@@ -193,8 +224,11 @@ class MainWindow(QMainWindow):
         bar.addWidget(self.btn_template_clear)
         bar.addStretch(1)
         self.engine_label = QLabel("")
+        self.ai_label = QLabel("")
         bar.addWidget(self.template_label)
         bar.addWidget(self.engine_label)
+        bar.addSpacing(12)
+        bar.addWidget(self.ai_label)
         bar.addSpacing(16)
         bar.addWidget(self.btn_export)
         root.addLayout(bar)
@@ -235,9 +269,21 @@ class MainWindow(QMainWindow):
         bottom = QHBoxLayout()
         self.progress = QProgressBar()
         self.progress.setVisible(False)
+        self.progress.setMinimumWidth(320)
+        self.progress.setFormat("%v / %m archivos")
         self.status = QLabel("Arrastra archivos o carpetas aquí, o usa los botones.")
         bottom.addWidget(self.status, 1)
         bottom.addWidget(self.progress, 0)
+
+        # Botón de Ko-fi (imagen clickeable) en el costado inferior derecho
+        self.kofi = ClickableLabel(_KOFI_URL)
+        pix = QPixmap(_resource_path("kofi.png"))
+        if not pix.isNull():
+            self.kofi.setPixmap(pix.scaledToHeight(34, Qt.SmoothTransformation))
+        else:
+            self.kofi.setText("☕ Ko-fi")
+        self.kofi.setFixedHeight(34)
+        bottom.addWidget(self.kofi, 0, Qt.AlignBottom)
         root.addLayout(bottom)
 
     def _refresh_engine_label(self):
@@ -252,6 +298,32 @@ class MainWindow(QMainWindow):
                 "ExifTool no encontrado; usando backend de respaldo (menos completo)."
             )
         self.engine_label.setStyleSheet(f"color:{color};font-weight:bold;")
+
+    def _refresh_ai_label(self):
+        """Indica si el agente de IA local (llama-cpp + modelo) está operativo."""
+        dark = self._is_dark()
+        from .llm import find_model
+
+        if llm_is_available():
+            self.ai_label.setText("IA: activa")
+            color = "#7ee2a8" if dark else "#155724"
+            model = find_model() or ""
+            self.ai_label.setToolTip(f"Modelo local cargado:\n{model}")
+        elif llama_cpp_installed():
+            self.ai_label.setText("IA: sin modelo")
+            color = "#f0c674" if dark else "#856404"
+            self.ai_label.setToolTip(
+                "El motor de IA está incluido, pero falta el modelo (~1.1 GB).\n"
+                "Se descargará la primera vez que cargues una plantilla con "
+                "columnas ambiguas, o con scripts/download_model.py."
+            )
+        else:
+            self.ai_label.setText("IA: no incluida")
+            color = "#999" if dark else "#666"
+            self.ai_label.setToolTip(
+                "llama-cpp-python no está instalado; solo mapeo determinístico."
+            )
+        self.ai_label.setStyleSheet(f"color:{color};font-weight:bold;")
 
     # ---------- Archivos ----------
     def _add_files(self):
@@ -346,6 +418,7 @@ class MainWindow(QMainWindow):
         self.progress.setVisible(True)
         self.progress.setRange(0, 0)
         self.progress.setValue(0)
+        self.progress.setFormat("Descargando modelo de IA… %p%")
         self._dl_worker = ModelDownloadWorker()
         self._dl_worker.progress.connect(self._on_dl_progress)
         self._dl_worker.done_ok.connect(lambda _p: self._on_dl_done(spec))
@@ -362,12 +435,14 @@ class MainWindow(QMainWindow):
         spec.columns = enhance_template_columns(spec.columns)
         self.template_label.setText(f"Plantilla: {spec.name} ({len(spec.columns)} col.)")
         self.status.setText("Modelo de IA listo; plantilla re-mapeada.")
+        self._refresh_ai_label()
 
     def _on_dl_failed(self, msg):
         self.progress.setVisible(False)
         self.status.setText(
             f"No se descargó el modelo de IA ({msg}); se usa el mapeo determinístico."
         )
+        self._refresh_ai_label()
 
     # ---------- Análisis ----------
     def _start_analysis(self):
@@ -376,9 +451,12 @@ class MainWindow(QMainWindow):
         pending = [p for p, s in self._summaries.items() if s is None]
         if not pending:
             return
+        self._pending_tried = set(pending)
         self.progress.setVisible(True)
         self.progress.setRange(0, len(pending))
         self.progress.setValue(0)
+        self.progress.setFormat("Analizando %v / %m archivos")
+        self.status.setText(f"Analizando {len(pending)} archivo(s)…")
         self._worker = Worker(pending, self.backend)
         self._worker.progress.connect(self._on_progress)
         self._worker.file_done.connect(self._on_file_done)
@@ -413,8 +491,13 @@ class MainWindow(QMainWindow):
     def _on_finished(self):
         self._worker = None
         self.progress.setVisible(False)
-        if any(s is None for s in self._summaries.values()):
-            # Archivos agregados mientras corría el análisis: procesarlos ahora.
+        # Solo reintenta archivos agregados mientras corría el análisis; nunca
+        # vuelve a procesar los que ya se intentaron (evita bucles infinitos).
+        pending = [
+            p for p, s in self._summaries.items()
+            if s is None and p not in self._pending_tried
+        ]
+        if pending:
             self._start_analysis()
         else:
             self._update_status()
