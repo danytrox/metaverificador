@@ -15,7 +15,12 @@ def _summaries_to_list(items: Iterable[Summary]) -> list[Summary]:
     return list(items)
 
 
-def export_csv(summaries: Iterable[Summary], path: str, template: TemplateSpec | None = None) -> None:
+def export_csv(
+    summaries: Iterable[Summary],
+    path: str,
+    template: TemplateSpec | None = None,
+    deleted: Iterable[Summary] | None = None,
+) -> None:
     summaries = _summaries_to_list(summaries)
     with open(path, "w", newline="", encoding="utf-8-sig") as f:
         w = csv.writer(f, delimiter=";")
@@ -40,22 +45,38 @@ def export_csv(summaries: Iterable[Summary], path: str, template: TemplateSpec |
             w.writerow([c.header for c in template.columns])
             for s in summaries:
                 w.writerow([resolve_cell(c, s) for c in template.columns])
+        if deleted:
+            deleted = list(deleted)
+            w.writerow([])
+            w.writerow(["Archivos eliminados (excluidos del análisis)", ""])
+            w.writerow(["Archivo", "Estado"])
+            for s in deleted:
+                w.writerow([s.filename, "Eliminado por el usuario"])
 
 
-def export_json(summaries: Iterable[Summary], path: str) -> None:
+def export_json(
+    summaries: Iterable[Summary],
+    path: str,
+    deleted: Iterable[Summary] | None = None,
+) -> None:
     summaries = _summaries_to_list(summaries)
     payload = []
     for s in summaries:
         rec = s.to_dict()
         rec["tags"] = s.tags
         payload.append(rec)
+    doc = {
+        "generated": datetime.now().isoformat(timespec="seconds"),
+        "backend": "local",
+        "files": payload,
+    }
+    if deleted:
+        doc["deleted_files"] = [
+            {"filename": s.filename, "path": s.path, "state": "eliminado"}
+            for s in list(deleted)
+        ]
     with open(path, "w", encoding="utf-8") as f:
-        json.dump(
-            {"generated": datetime.now().isoformat(timespec="seconds"),
-             "backend": "local",
-             "files": payload},
-            f, ensure_ascii=False, indent=2,
-        )
+        json.dump(doc, f, ensure_ascii=False, indent=2)
 
 
 _DEFAULT_HTML_COLUMNS = ["Archivo", "Tipo", "Autor", "Autor (valores)", "Título", "Fecha", "Software", "Advertencias", "Detalle"]
@@ -90,12 +111,18 @@ _HTML_TEMPLATE = """<!doctype html>
 {rows}
 </tbody>
 </table>
+{deleted_section}
 </body>
 </html>
 """
 
 
-def export_html(summaries: Iterable[Summary], path: str, template: TemplateSpec | None = None) -> None:
+def export_html(
+    summaries: Iterable[Summary],
+    path: str,
+    template: TemplateSpec | None = None,
+    deleted: Iterable[Summary] | None = None,
+) -> None:
     summaries = _summaries_to_list(summaries)
     rows = []
     if template is None:
@@ -138,11 +165,22 @@ def export_html(summaries: Iterable[Summary], path: str, template: TemplateSpec 
                 else:
                     cells.append(f"<td>{html.escape(val)}</td>")
             rows.append(f'<tr class="{cls}">' + "".join(cells) + "</tr>")
+    deleted_html = ""
+    if deleted:
+        deleted = list(deleted)
+        items = "".join(f"<li>{html.escape(s.filename)}</li>" for s in deleted)
+        deleted_html = (
+            '<h2>Archivos eliminados</h2>'
+            f'<div class="meta">Se quitaron {len(deleted)} archivo(s) de la lista '
+            "antes de exportar:</div>"
+            f"<ul>{items}</ul>"
+        )
     doc = _HTML_TEMPLATE.format(
         generated=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         n=len(summaries),
         headers=header_cells,
         rows="\n".join(rows),
+        deleted_section=deleted_html,
     )
     with open(path, "w", encoding="utf-8") as f:
         f.write(doc)
@@ -203,6 +241,33 @@ def _add_metadata_sheet(wb, summaries: list[Summary]) -> None:
         ws.auto_filter.ref = f"A1:D{r - 1}"
 
 
+def _add_deleted_sheet(wb, deleted: list[Summary]) -> None:
+    """Hoja 'Eliminados': archivos que el usuario quitó antes de exportar."""
+    if not deleted:
+        return
+    from openpyxl.utils import get_column_letter
+
+    st = _xlsx_styles()
+    ws = wb.create_sheet("Eliminados")
+    cols = ["Archivo", "Ruta", "Estado"]
+    for i, name in enumerate(cols, start=1):
+        cell = ws.cell(row=1, column=i, value=name)
+        cell.font = st["header_font"]
+        cell.fill = st["header_fill"]
+        cell.alignment = st["center"]
+        cell.border = st["border"]
+
+    for r, s in enumerate(deleted, start=2):
+        for i, val in enumerate([s.filename, s.path, "Eliminado por el usuario"], start=1):
+            cell = ws.cell(row=r, column=i, value=val)
+            cell.border = st["border"]
+            cell.alignment = st["top_wrap"]
+
+    for i, w in enumerate([38, 70, 24], start=1):
+        ws.column_dimensions[get_column_letter(i)].width = w
+    ws.freeze_panes = "A2"
+
+
 def _add_template_sheet(ws, summaries: list[Summary], template: TemplateSpec) -> None:
     """Hoja 'Datos' generada a partir de una plantilla de columnas."""
     from openpyxl.styles import Alignment
@@ -257,7 +322,12 @@ def _add_template_sheet(ws, summaries: list[Summary], template: TemplateSpec) ->
         ws.auto_filter.ref = f"A{header_row}:{last_col}{last_row}"
 
 
-def export_xlsx(summaries: Iterable[Summary], path: str, template: TemplateSpec | None = None) -> None:
+def export_xlsx(
+    summaries: Iterable[Summary],
+    path: str,
+    template: TemplateSpec | None = None,
+    deleted: Iterable[Summary] | None = None,
+) -> None:
     """Exporta a Excel (.xlsx).
 
     Sin plantilla: dos hojas — "Resumen" (una fila por archivo con autor SÍ/NO,
@@ -351,5 +421,8 @@ def export_xlsx(summaries: Iterable[Summary], path: str, template: TemplateSpec 
 
     # ---------- Hoja: Metadatos completos ----------
     _add_metadata_sheet(wb, summaries)
+
+    # ---------- Hoja: Eliminados (si el usuario quitó archivos) ----------
+    _add_deleted_sheet(wb, list(deleted or []))
 
     wb.save(path)

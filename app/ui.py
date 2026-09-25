@@ -9,7 +9,7 @@ from __future__ import annotations
 import os
 import sys
 
-from PySide6.QtCore import Qt, QThread, QUrl, Signal, Slot
+from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal, Slot
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
@@ -77,6 +77,46 @@ class ClickableLabel(QLabel):
         super().mouseReleaseEvent(event)
 
 
+class FileRow(QWidget):
+    """Fila de la lista de archivos: nombre (con elipsis) + botón de basura."""
+
+    def __init__(self, text: str, tooltip: str, on_trash, parent=None):
+        super().__init__(parent)
+        self.setFixedHeight(24)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(6, 0, 4, 0)
+        lay.setSpacing(4)
+        self.label = QLabel(text)
+        self.label.setToolTip(tooltip)
+        self.label.setTextInteractionFlags(Qt.NoTextInteraction)
+        self.btn_trash = QToolButton()
+        self.btn_trash.setText("🗑")
+        self.btn_trash.setToolTip("Quitar este archivo de la lista")
+        self.btn_trash.setAutoRaise(True)
+        self.btn_trash.setFixedSize(22, 22)
+        self.btn_trash.setCursor(Qt.PointingHandCursor)
+        self.btn_trash.clicked.connect(on_trash)
+        lay.addWidget(self.label, 1)
+        lay.addWidget(self.btn_trash, 0)
+
+
+class FileListWidget(QListWidget):
+    """Lista de archivos que avisa al cambiar de tamaño (para re-elipsar)."""
+
+    resized = Signal()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.resized.emit()
+
+    def watch_scrollbar(self):
+        # Al aparecer/desaparecer la barra de scroll cambia el ancho útil de las
+        # filas (aunque el widget no cambie de tamaño): hay que re-elipsar.
+        self.verticalScrollBar().rangeChanged.connect(
+            lambda _min, _max: self.resized.emit()
+        )
+
+
 class Worker(QThread):
     progress = Signal(int, int)
     file_done = Signal(object)
@@ -138,11 +178,19 @@ class MainWindow(QMainWindow):
 
         self.backend = get_backend()
         self._summaries = {}  # path -> Summary
+        self._deleted = {}  # path -> Summary (quitados; salen en el informe)
         self._row_index = {}  # path -> fila de la tabla (lookup O(1))
+        self._row_labels = {}  # path -> QLabel de la fila (para elipsis)
+        self._row_names = {}  # path -> nombre mostrado (para elipsis)
         self._worker = None
         self._dl_worker = None
         self._template = None
         self._pending_tried = set()  # paths ya procesados por el worker actual
+        self._checked = set()  # paths marcados para borrar
+        self._undo_batch = []  # última tanda quitada [(path, summary_original)]
+        self._undo_timer = QTimer(self)
+        self._undo_timer.setSingleShot(True)
+        self._undo_timer.timeout.connect(self._on_undo_timeout)
 
         self._build_ui()
         self._refresh_engine_label()
@@ -178,12 +226,8 @@ class MainWindow(QMainWindow):
         bar = QHBoxLayout()
         self.btn_add_files = QPushButton("Agregar archivos")
         self.btn_add_folder = QPushButton("Agregar carpeta")
-        self.btn_remove = QPushButton("Quitar seleccionados")
-        self.btn_clear = QPushButton("Limpiar")
         self.btn_add_files.setToolTip("Selecciona uno o más archivos para analizar")
         self.btn_add_folder.setToolTip("Analiza todos los archivos de una carpeta (recursivo)")
-        self.btn_remove.setToolTip("Quita de la lista los archivos seleccionados")
-        self.btn_clear.setToolTip("Vacía la lista y los resultados")
 
         # Plantilla opcional
         self.btn_template = QPushButton("Cargar plantilla")
@@ -213,12 +257,10 @@ class MainWindow(QMainWindow):
 
         self.btn_add_files.clicked.connect(self._add_files)
         self.btn_add_folder.clicked.connect(self._add_folder)
-        self.btn_remove.clicked.connect(self._remove_selected)
-        self.btn_clear.clicked.connect(self._clear)
         self.btn_template.clicked.connect(self._load_template)
         self.btn_template_clear.clicked.connect(self._clear_template)
 
-        for b in (self.btn_add_files, self.btn_add_folder, self.btn_remove, self.btn_clear):
+        for b in (self.btn_add_files, self.btn_add_folder):
             bar.addWidget(b)
         bar.addWidget(self.btn_template)
         bar.addWidget(self.btn_template_clear)
@@ -235,11 +277,55 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Horizontal)
 
-        # Lista de archivos (izquierda)
-        self.file_list = QListWidget()
+        # Panel izquierdo: barra de borrado + lista de archivos
+        left = QWidget()
+        ll = QVBoxLayout(left)
+        ll.setContentsMargins(0, 0, 0, 0)
+        ll.setSpacing(2)
+
+        self.btn_toggle_del = QToolButton()
+        self.btn_toggle_del.setText("Quitar archivos…")
+        self.btn_toggle_del.setCheckable(True)
+        self.btn_toggle_del.setToolTip(
+            "Abre un panel para elegir qué archivos quitar de la lista"
+        )
+        self.btn_toggle_del.toggled.connect(self._toggle_del_panel)
+        ll.addWidget(self.btn_toggle_del)
+
+        self.file_list = FileListWidget()
         self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.file_list.setUniformItemSizes(True)
         self.file_list.itemSelectionChanged.connect(self._on_selection)
-        splitter.addWidget(self.file_list)
+        self.file_list.resized.connect(self._elide_labels)
+        self.file_list.watch_scrollbar()
+        ll.addWidget(self.file_list, 1)
+
+        # Panel desplegable para elegir archivos a borrar
+        self.del_panel = QWidget()
+        dp = QVBoxLayout(self.del_panel)
+        dp.setContentsMargins(4, 2, 4, 4)
+        dp.setSpacing(4)
+        dtop = QHBoxLayout()
+        self.btn_check_all = QPushButton("Marcar todos")
+        self.btn_check_none = QPushButton("Desmarcar")
+        self.btn_check_all.clicked.connect(lambda: self._set_all_checked(True))
+        self.btn_check_none.clicked.connect(lambda: self._set_all_checked(False))
+        dtop.addWidget(self.btn_check_all)
+        dtop.addWidget(self.btn_check_none)
+        dtop.addStretch(1)
+        dp.addLayout(dtop)
+        self.del_list = QListWidget()
+        self.del_list.setMaximumHeight(180)
+        self.del_list.setToolTip("Marca los archivos que quieras quitar")
+        self.del_list.itemChanged.connect(self._on_del_item_changed)
+        dp.addWidget(self.del_list, 1)
+        self.btn_del_go = QPushButton("🗑 Borrar marcados")
+        self.btn_del_go.setEnabled(False)
+        self.btn_del_go.clicked.connect(self._delete_checked)
+        dp.addWidget(self.btn_del_go)
+        ll.addWidget(self.del_panel)
+        self.del_panel.setVisible(False)
+        splitter.addWidget(left)
 
         # Panel derecho: tabla + detalle
         right = QWidget()
@@ -272,7 +358,13 @@ class MainWindow(QMainWindow):
         self.progress.setMinimumWidth(320)
         self.progress.setFormat("%v / %m archivos")
         self.status = QLabel("Arrastra archivos o carpetas aquí, o usa los botones.")
+        self.undo_label = QLabel("")
+        self.undo_label.setVisible(False)
+        self.undo_label.setTextFormat(Qt.RichText)
+        self.undo_label.linkActivated.connect(self._undo_delete)
+        self.undo_label.setToolTip("Restaura los archivos recién quitados")
         bottom.addWidget(self.status, 1)
+        bottom.addWidget(self.undo_label, 0)
         bottom.addWidget(self.progress, 0)
 
         # Botón de Ko-fi (imagen clickeable) en el costado inferior derecho
@@ -347,30 +439,137 @@ class MainWindow(QMainWindow):
             p = os.path.abspath(p)
             if not os.path.isfile(p) or p in self._summaries:
                 continue
-            item = QListWidgetItem(os.path.basename(p))
-            item.setToolTip(p)
-            item.setData(Qt.UserRole, p)
-            self.file_list.addItem(item)
+            self._deleted.pop(p, None)  # re-agregar un archivo quitado lo restaura
+            self._add_row(p)
             self._summaries[p] = None  # pendiente
             added += 1
         if added:
+            self._rebuild_del_list()
             self._start_analysis()
 
-    def _remove_selected(self):
-        for item in self.file_list.selectedItems():
-            self._summaries.pop(item.data(Qt.UserRole), None)
-            self.file_list.takeItem(self.file_list.row(item))
-        self._rebuild_table()
+    def _add_row(self, path):
+        name = os.path.basename(path)
+        item = QListWidgetItem(name)
+        item.setToolTip(path)
+        item.setData(Qt.UserRole, path)
+        self.file_list.addItem(item)
+        row = FileRow(name, path, lambda _p=path: self._delete_files([_p]))
+        self.file_list.setItemWidget(item, row)
+        item.setSizeHint(QSize(0, 24))
+        self._row_labels[path] = row.label
+        self._row_names[path] = name
+        self._elide_labels()
+        return item
 
-    def _clear(self):
-        if self._worker and self._worker.isRunning():
-            self._worker.cancel()
-        self.file_list.clear()
-        self._summaries.clear()
-        self._row_index = {}
-        self.detail.clear()
-        self.table.setRowCount(0)
+    def _elide_labels(self):
+        width = max(60, self.file_list.viewport().width() - 36)
+        for path, label in self._row_labels.items():
+            name = self._row_names.get(path) or label.text()
+            label.setText(label.fontMetrics().elidedText(name, Qt.ElideMiddle, width))
+
+    # ---------- Borrado de archivos ----------
+    def _toggle_del_panel(self, visible):
+        self.del_panel.setVisible(visible)
+        if visible:
+            self._rebuild_del_list()
+
+    def _rebuild_del_list(self):
+        self.del_list.blockSignals(True)
+        self.del_list.clear()
+        for p in self._summaries:
+            item = QListWidgetItem(os.path.basename(p))
+            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+            item.setCheckState(Qt.Checked if p in self._checked else Qt.Unchecked)
+            item.setData(Qt.UserRole, p)
+            item.setToolTip(p)
+            self.del_list.addItem(item)
+        self.del_list.blockSignals(False)
+        self._refresh_select_state()
+
+    def _on_del_item_changed(self, item):
+        p = item.data(Qt.UserRole)
+        if not p:
+            return
+        if item.checkState() == Qt.Checked:
+            self._checked.add(p)
+        else:
+            self._checked.discard(p)
+        self._refresh_select_state()
+
+    def _refresh_select_state(self):
+        n = len(self._checked)
+        self.btn_del_go.setEnabled(n > 0)
+        self.btn_del_go.setText(
+            f"🗑 Borrar marcados ({n})" if n else "🗑 Borrar marcados"
+        )
+
+    def _set_all_checked(self, flag):
+        if flag:
+            self._checked = set(self._summaries)
+        else:
+            self._checked.clear()
+        self._rebuild_del_list()
+
+    def _delete_checked(self):
+        self._delete_files(sorted(self._checked))
+
+    def _delete_files(self, paths):
+        paths = [p for p in paths if p in self._summaries]
+        if not paths:
+            return
+        batch = []
+        for p in paths:
+            original = self._summaries.pop(p)
+            display = (
+                original
+                if original is not None
+                else Summary(path=p, filename=os.path.basename(p), tags={})
+            )
+            self._deleted[p] = display
+            batch.append((p, original))
+        for i in range(self.file_list.count() - 1, -1, -1):
+            item = self.file_list.item(i)
+            if item.data(Qt.UserRole) in self._deleted:
+                self.file_list.takeItem(i)
+        for p, _ in batch:
+            self._row_labels.pop(p, None)
+            self._row_names.pop(p, None)
+            self._row_index.pop(p, None)
+            self._checked.discard(p)
+        self._rebuild_del_list()
+        self._rebuild_table()
         self._update_status()
+        self._undo_batch = batch
+        self._show_undo(batch)
+
+    def _show_undo(self, batch):
+        n = len(batch)
+        self.undo_label.setText(
+            f'Se quitaron {n} archivo(s) · <a href="undo">Deshacer</a>'
+        )
+        self.undo_label.setVisible(True)
+        self._undo_timer.start(8000)
+
+    def _undo_delete(self, *_args):
+        if not self._undo_batch:
+            return
+        batch, self._undo_batch = self._undo_batch, []
+        self._undo_timer.stop()
+        self.undo_label.setVisible(False)
+        for p, original in batch:
+            self._deleted.pop(p, None)
+            self._summaries[p] = original
+            self._add_row(p)
+        self._rebuild_del_list()
+        self._rebuild_table()
+        self._update_status()
+        pending = [p for p, s in batch if s is None]
+        if pending:
+            self._start_analysis()
+
+    def _on_undo_timeout(self):
+        self.undo_label.setVisible(False)
+        self._undo_batch = []
 
     # ---------- Plantilla opcional ----------
     def _load_template(self):
@@ -506,14 +705,24 @@ class MainWindow(QMainWindow):
         total = len(self._summaries)
         done = sum(1 for s in self._summaries.values() if s is not None)
         if not total:
-            self.status.setText("Arrastra archivos o carpetas aquí, o usa los botones.")
-            self.btn_export.setEnabled(False)
+            if self._deleted:
+                self.status.setText(
+                    f"Se quitaron {len(self._deleted)} archivo(s); "
+                    "exporta para verlos en el informe."
+                )
+                self.btn_export.setEnabled(True)
+            else:
+                self.status.setText("Arrastra archivos o carpetas aquí, o usa los botones.")
+                self.btn_export.setEnabled(False)
             return
         missing = sum(1 for s in self._summaries.values() if s is not None and not s.author_found)
-        self.btn_export.setEnabled(done > 0)
+        self.btn_export.setEnabled(done > 0 or bool(self._deleted))
+        extra = ""
+        if self._deleted:
+            extra = f" · {len(self._deleted)} quitado(s) (aparecen en el informe)"
         self.status.setText(
-            f"{done}/{total} analizados · {missing} sin autor · "
-            "los archivos nunca salen de este equipo"
+            f"{done}/{total} analizados · {missing} sin autor"
+            f"{extra} · los archivos nunca salen de este equipo"
         )
 
     # ---------- Tabla ----------
@@ -601,7 +810,8 @@ class MainWindow(QMainWindow):
     # ---------- Exportación ----------
     def _export(self, fmt):
         done = [s for s in self._summaries.values() if s is not None]
-        if not done:
+        deleted = list(self._deleted.values())
+        if not done and not deleted:
             QMessageBox.information(self, "MetaVerificador", "No hay resultados que exportar.")
             return
         filters = {"csv": "CSV (*.csv)", "json": "JSON (*.json)", "html": "HTML (*.html)", "xlsx": "Excel (*.xlsx)"}
@@ -610,13 +820,13 @@ class MainWindow(QMainWindow):
             return
         try:
             if fmt == "csv":
-                export_csv(done, path, template=self._template)
+                export_csv(done, path, template=self._template, deleted=deleted)
             elif fmt == "json":
-                export_json(done, path)
+                export_json(done, path, deleted=deleted)
             elif fmt == "xlsx":
-                export_xlsx(done, path, template=self._template)
+                export_xlsx(done, path, template=self._template, deleted=deleted)
             else:
-                export_html(done, path, template=self._template)
+                export_html(done, path, template=self._template, deleted=deleted)
         except Exception as exc:  # noqa: BLE001
             QMessageBox.critical(self, "MetaVerificador", f"Error al exportar: {exc}")
             return
