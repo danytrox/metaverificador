@@ -14,6 +14,7 @@ from PySide6.QtGui import QColor, QDesktopServices, QFont, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QHeaderView,
@@ -47,6 +48,10 @@ from .template import load_template
 
 _COLUMNS = ["Archivo", "Tipo", "Autor", "Autor (valores)", "Título", "Fecha", "Software"]
 
+# Ancho máximo (px) al que se elide el texto de las columnas largas de la tabla,
+# para que un título muy largo no estire su columna y empuje fuera a las vecinas.
+_MAX_CELL_WIDTH = 180
+
 _KOFI_URL = "https://ko-fi.com/F1F41CSLRO"
 
 
@@ -78,14 +83,18 @@ class ClickableLabel(QLabel):
 
 
 class FileRow(QWidget):
-    """Fila de la lista de archivos: nombre (con elipsis) + botón de basura."""
+    """Fila de la lista de archivos: casilla para marcar + nombre (elipsis) + basura."""
 
-    def __init__(self, text: str, tooltip: str, on_trash, parent=None):
+    def __init__(self, text: str, tooltip: str, on_trash, on_check, parent=None):
         super().__init__(parent)
         self.setFixedHeight(24)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(6, 0, 4, 0)
         lay.setSpacing(4)
+        self.check = QCheckBox()
+        self.check.setToolTip("Marcar para quitar este archivo de la lista")
+        self.check.setFixedSize(20, 20)
+        self.check.toggled.connect(on_check)
         self.label = QLabel(text)
         self.label.setToolTip(tooltip)
         self.label.setTextInteractionFlags(Qt.NoTextInteraction)
@@ -96,6 +105,7 @@ class FileRow(QWidget):
         self.btn_trash.setFixedSize(22, 22)
         self.btn_trash.setCursor(Qt.PointingHandCursor)
         self.btn_trash.clicked.connect(on_trash)
+        lay.addWidget(self.check, 0)
         lay.addWidget(self.label, 1)
         lay.addWidget(self.btn_trash, 0)
 
@@ -182,6 +192,8 @@ class MainWindow(QMainWindow):
         self._row_index = {}  # path -> fila de la tabla (lookup O(1))
         self._row_labels = {}  # path -> QLabel de la fila (para elipsis)
         self._row_names = {}  # path -> nombre mostrado (para elipsis)
+        self._row_checks = {}  # path -> QCheckBox de la fila (para marcar/borrar)
+        self._syncing = False  # evita realimentación al sincronizar lista <-> tabla
         self._worker = None
         self._dl_worker = None
         self._template = None
@@ -283,15 +295,6 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(2)
 
-        self.btn_toggle_del = QToolButton()
-        self.btn_toggle_del.setText("Quitar archivos…")
-        self.btn_toggle_del.setCheckable(True)
-        self.btn_toggle_del.setToolTip(
-            "Abre un panel para elegir qué archivos quitar de la lista"
-        )
-        self.btn_toggle_del.toggled.connect(self._toggle_del_panel)
-        ll.addWidget(self.btn_toggle_del)
-
         self.file_list = FileListWidget()
         self.file_list.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.file_list.setUniformItemSizes(True)
@@ -300,31 +303,14 @@ class MainWindow(QMainWindow):
         self.file_list.watch_scrollbar()
         ll.addWidget(self.file_list, 1)
 
-        # Panel desplegable para elegir archivos a borrar
-        self.del_panel = QWidget()
-        dp = QVBoxLayout(self.del_panel)
-        dp.setContentsMargins(4, 2, 4, 4)
-        dp.setSpacing(4)
-        dtop = QHBoxLayout()
-        self.btn_check_all = QPushButton("Marcar todos")
-        self.btn_check_none = QPushButton("Desmarcar")
-        self.btn_check_all.clicked.connect(lambda: self._set_all_checked(True))
-        self.btn_check_none.clicked.connect(lambda: self._set_all_checked(False))
-        dtop.addWidget(self.btn_check_all)
-        dtop.addWidget(self.btn_check_none)
-        dtop.addStretch(1)
-        dp.addLayout(dtop)
-        self.del_list = QListWidget()
-        self.del_list.setMaximumHeight(180)
-        self.del_list.setToolTip("Marca los archivos que quieras quitar")
-        self.del_list.itemChanged.connect(self._on_del_item_changed)
-        dp.addWidget(self.del_list, 1)
+        # Borrar: se marcan los archivos con la casilla de cada fila de la lista.
         self.btn_del_go = QPushButton("🗑 Borrar marcados")
         self.btn_del_go.setEnabled(False)
+        self.btn_del_go.setToolTip(
+            "Quita de la lista los archivos marcados con su casilla"
+        )
         self.btn_del_go.clicked.connect(self._delete_checked)
-        dp.addWidget(self.btn_del_go)
-        ll.addWidget(self.del_panel)
-        self.del_panel.setVisible(False)
+        ll.addWidget(self.btn_del_go)
         splitter.addWidget(left)
 
         # Panel derecho: tabla + detalle
@@ -444,56 +430,47 @@ class MainWindow(QMainWindow):
             self._summaries[p] = None  # pendiente
             added += 1
         if added:
-            self._rebuild_del_list()
             self._start_analysis()
 
     def _add_row(self, path):
         name = os.path.basename(path)
-        item = QListWidgetItem(name)
+        # Texto vacío: el nombre lo pinta el FileRow. Si además le pusiéramos el
+        # texto al item, el delegado dibujaría el nombre "crudo" debajo del
+        # widget y aparecerían dos títulos corridos (solapados).
+        item = QListWidgetItem()
         item.setToolTip(path)
         item.setData(Qt.UserRole, path)
         self.file_list.addItem(item)
-        row = FileRow(name, path, lambda _p=path: self._delete_files([_p]))
+        row = FileRow(
+            name,
+            path,
+            # `clicked` emite un bool; lo recibimos en `_checked` y usamos `path`
+            # capturado. (Si el lambda tomara el bool como primer arg, borraría
+            # un path inválido y la papelera no haría nada.)
+            on_trash=lambda _checked=False, _p=path: self._delete_files([_p]),
+            on_check=lambda _ck, _p=path: self._on_row_check(_p, _ck),
+        )
         self.file_list.setItemWidget(item, row)
         item.setSizeHint(QSize(0, 24))
         self._row_labels[path] = row.label
         self._row_names[path] = name
+        self._row_checks[path] = row.check
         self._elide_labels()
         return item
 
     def _elide_labels(self):
-        width = max(60, self.file_list.viewport().width() - 36)
+        # 60 px = márgenes (10) + espaciados (8) + casilla (20) + botón (22).
+        width = max(60, self.file_list.viewport().width() - 60)
         for path, label in self._row_labels.items():
             name = self._row_names.get(path) or label.text()
             label.setText(label.fontMetrics().elidedText(name, Qt.ElideMiddle, width))
 
     # ---------- Borrado de archivos ----------
-    def _toggle_del_panel(self, visible):
-        self.del_panel.setVisible(visible)
-        if visible:
-            self._rebuild_del_list()
-
-    def _rebuild_del_list(self):
-        self.del_list.blockSignals(True)
-        self.del_list.clear()
-        for p in self._summaries:
-            item = QListWidgetItem(os.path.basename(p))
-            item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Checked if p in self._checked else Qt.Unchecked)
-            item.setData(Qt.UserRole, p)
-            item.setToolTip(p)
-            self.del_list.addItem(item)
-        self.del_list.blockSignals(False)
-        self._refresh_select_state()
-
-    def _on_del_item_changed(self, item):
-        p = item.data(Qt.UserRole)
-        if not p:
-            return
-        if item.checkState() == Qt.Checked:
-            self._checked.add(p)
+    def _on_row_check(self, path, checked):
+        if checked:
+            self._checked.add(path)
         else:
-            self._checked.discard(p)
+            self._checked.discard(path)
         self._refresh_select_state()
 
     def _refresh_select_state(self):
@@ -502,13 +479,6 @@ class MainWindow(QMainWindow):
         self.btn_del_go.setText(
             f"🗑 Borrar marcados ({n})" if n else "🗑 Borrar marcados"
         )
-
-    def _set_all_checked(self, flag):
-        if flag:
-            self._checked = set(self._summaries)
-        else:
-            self._checked.clear()
-        self._rebuild_del_list()
 
     def _delete_checked(self):
         self._delete_files(sorted(self._checked))
@@ -534,9 +504,10 @@ class MainWindow(QMainWindow):
         for p, _ in batch:
             self._row_labels.pop(p, None)
             self._row_names.pop(p, None)
+            self._row_checks.pop(p, None)
             self._row_index.pop(p, None)
             self._checked.discard(p)
-        self._rebuild_del_list()
+        self._refresh_select_state()
         self._rebuild_table()
         self._update_status()
         self._undo_batch = batch
@@ -560,7 +531,6 @@ class MainWindow(QMainWindow):
             self._deleted.pop(p, None)
             self._summaries[p] = original
             self._add_row(p)
-        self._rebuild_del_list()
         self._rebuild_table()
         self._update_status()
         pending = [p for p, s in batch if s is None]
@@ -743,8 +713,18 @@ class MainWindow(QMainWindow):
             summary.creation_date,
             " | ".join(summary.software),
         ]
+        fm = self.table.fontMetrics()
+        # Columnas con texto potencialmente largo: se eliden para que la tabla
+        # no se estire y empuje a las columnas vecinas fuera de la vista.
+        elide = {0: Qt.ElideMiddle, 4: Qt.ElideRight, 6: Qt.ElideRight}
         for col, text in enumerate(values):
-            item = QTableWidgetItem(text)
+            mode = elide.get(col)
+            if mode is not None and text:
+                full = str(text)
+                item = QTableWidgetItem(fm.elidedText(full, mode, _MAX_CELL_WIDTH))
+                item.setToolTip(full)
+            else:
+                item = QTableWidgetItem(text)
             item.setData(Qt.UserRole, summary.path)
             if not summary.author_found:
                 item.setBackground(QColor(colors["no_bg"]))
@@ -766,18 +746,54 @@ class MainWindow(QMainWindow):
                 self._upsert_table_row(summary)
 
     def _on_selection(self):
+        if self._syncing:
+            return
         items = self.file_list.selectedItems()
         if not items:
             return
         path = items[0].data(Qt.UserRole)
+        self._sync_table_row(path)
         self._select_path(path)
 
     def _on_row_select(self):
+        if self._syncing:
+            return
         rows = self.table.selectionModel().selectedRows()
         if not rows:
             return
-        path = self.table.item(rows[0].row(), 0).data(Qt.UserRole)
+        item = self.table.item(rows[0].row(), 0)
+        if item is None:
+            return
+        path = item.data(Qt.UserRole)
+        self._sync_list_item(path)
         self._select_path(path)
+
+    def _sync_table_row(self, path):
+        """Mantiene lista y tabla con una única selección lógica."""
+        row = self._row_index.get(path, -1)
+        if row < 0:
+            return
+        self._syncing = True
+        try:
+            self.table.blockSignals(True)
+            self.table.selectRow(row)
+            self.table.blockSignals(False)
+        finally:
+            self._syncing = False
+
+    def _sync_list_item(self, path):
+        """Mantiene lista y tabla con una única selección lógica."""
+        self._syncing = True
+        try:
+            for i in range(self.file_list.count()):
+                it = self.file_list.item(i)
+                if it.data(Qt.UserRole) == path:
+                    self.file_list.blockSignals(True)
+                    it.setSelected(True)
+                    self.file_list.blockSignals(False)
+                    break
+        finally:
+            self._syncing = False
 
     def _select_path(self, path):
         summary = self._summaries.get(path)

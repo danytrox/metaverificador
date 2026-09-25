@@ -10,6 +10,8 @@
 
 from PyInstaller.utils.hooks import collect_dynamic_libs
 
+import sys
+
 datas = [('resources/exiftool', 'exiftool'), ('resources/kofi.png', '.')]
 binaries = []
 hiddenimports = []
@@ -57,12 +59,7 @@ a = Analysis(
 
 pyz = PYZ(a.pure)
 
-exe = EXE(
-    pyz,
-    a.scripts,
-    a.binaries,
-    a.datas,
-    [],
+exe_kwargs = dict(
     name='MetaVerificador',
     debug=False,
     bootloader_ignore_signals=False,
@@ -74,5 +71,16 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    version='version_info.txt',
+)
+# El recurso de versión solo aplica a Windows.
+if sys.platform == 'win32':
+    exe_kwargs['version'] = 'version_info.txt'
+
+exe = EXE(
+    pyz,
+    a.scripts,
+    a.binaries,
+    a.datas,
+    [],
+    **exe_kwargs,
 )
