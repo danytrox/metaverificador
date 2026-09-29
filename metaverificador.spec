@@ -12,7 +12,7 @@ from PyInstaller.utils.hooks import collect_dynamic_libs
 
 import sys
 
-datas = [('resources/exiftool', 'exiftool'), ('resources/kofi.png', '.')]
+datas = [('resources/exiftool', 'exiftool'), ('resources/kofi.png', '.'), ('resources/icon.png', '.')]
 binaries = []
 hiddenimports = []
 
@@ -72,9 +72,10 @@ exe_kwargs = dict(
     codesign_identity=None,
     entitlements_file=None,
 )
-# El recurso de versión solo aplica a Windows.
+# El recurso de versión y el ícono del ejecutable solo aplican a Windows.
 if sys.platform == 'win32':
     exe_kwargs['version'] = 'version_info.txt'
+    exe_kwargs['icon'] = 'resources/icon.ico'
 
 exe = EXE(
     pyz,

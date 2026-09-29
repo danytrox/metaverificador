@@ -10,7 +10,7 @@ import os
 import sys
 
 from PySide6.QtCore import QSize, Qt, QThread, QTimer, QUrl, Signal, Slot
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QPalette, QPixmap
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -872,6 +872,11 @@ class MainWindow(QMainWindow):
 def run_gui() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("MetaVerificador")
+    icon = QIcon(_resource_path("icon.png"))
+    if not icon.isNull():
+        app.setWindowIcon(icon)
     win = MainWindow()
+    if not icon.isNull():
+        win.setWindowIcon(icon)
     win.show()
     return app.exec()
