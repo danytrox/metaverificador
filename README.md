@@ -10,6 +10,18 @@ documento?** Muchos archivos (sobre todo PDFs) no registran autor, y las webs
 de metadatos no lo muestran porque el dato simplemente no existe. Esta
 herramienta lo detecta y te lo explica, sin exponer tus archivos.
 
+## Descargar
+
+**Windows** (portátil, sin instalación):
+
+[![Descargar MetaVerificador (.exe)](https://img.shields.io/badge/Descargar_MetaVerificador-.exe_(Windows)-2ea44f?style=for-the-badge)](https://github.com/danytrox/metaverificador/releases/latest/download/MetaVerificador.exe)
+
+Todas las versiones: [Releases](https://github.com/danytrox/metaverificador/releases).
+
+Cada tag `v*` compila el `.exe` automáticamente con GitHub Actions y lo publica
+como release. El build **con IA local** (opcional) también queda disponible en
+la pestaña *Actions*.
+
 ## Características
 
 - Extrae **todos** los metadatos: Info del PDF, XMP, EXIF, IPTC, etc.
